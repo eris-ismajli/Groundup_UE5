@@ -357,6 +357,22 @@ void ASmoothVoxelTerrain::UpdateProceduralTerrain()
 
     FIntVector PlayerChunk = WorldToChunkCoord(PlayerPos);
 
+    // High-performance GPU Culling logic based on GrassRenderDistance
+    int32 GrassDistSq = FMath::Square(GrassRenderDistance);
+    for (auto& Pair : Chunks)
+    {
+        if (Pair.Value && Pair.Value->GrassMeshComponent)
+        {
+            int32 DistSq = FMath::Square(Pair.Key.X - PlayerChunk.X) + FMath::Square(Pair.Key.Y - PlayerChunk.Y);
+            bool bShouldBeVisible = bEnableGrassGeometry && (DistSq <= GrassDistSq);
+
+            if (Pair.Value->GrassMeshComponent->IsVisible() != bShouldBeVisible)
+            {
+                Pair.Value->GrassMeshComponent->SetVisibility(bShouldBeVisible);
+            }
+        }
+    }
+
     if (PlayerChunk != LastPlayerChunkCoord)
     {
         LastPlayerChunkCoord = PlayerChunk;
@@ -446,7 +462,10 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
     GrassMeshComp->AttachToComponent(RootSceneComponent, FAttachmentTransformRules::KeepRelativeTransform);
     GrassMeshComp->SetRelativeTransform(FTransform());
     GrassMeshComp->RegisterComponent();
-    GrassMeshComp->SetVisibility(true);
+
+    int32 DistSq = FMath::Square(ChunkCoord.X - LastPlayerChunkCoord.X) + FMath::Square(ChunkCoord.Y - LastPlayerChunkCoord.Y);
+    GrassMeshComp->SetVisibility(bEnableGrassGeometry && (DistSq <= FMath::Square(GrassRenderDistance)));
+
     GrassMeshComp->SetCastShadow(false);
     GrassMeshComp->SetReceivesDecals(false);
     GrassMeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -616,7 +635,6 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
             LocalGrassMesh.EnableAttributes();
             FDynamicMeshAttributeSet* GrassAttr = LocalGrassMesh.Attributes();
             GrassAttr->SetNumUVLayers(2);
-            // Grass explicitly no longer uses Primary Colors to save performance and memory
 
             FChunkNeighborhood Neighborhood;
             Neighborhood.SelfData = SelfDataCopy.GetData();
@@ -936,11 +954,7 @@ FLinearColor ASmoothVoxelTerrain::GetStylizedColorForVoxel(const FVector& WorldP
     float VoxY = (float)WorldPos.Y / CubeSize;
     float VoxZ = (float)WorldPos.Z / CubeSize;
 
-    // Grass color is now fully decided by the material. We keep color noise for Dirt and Stone.
-    if (VoxelType == EVoxelType::Grass)
-    {
-        return FLinearColor::White;
-    }
+    if (VoxelType == EVoxelType::Grass) return FLinearColor::White;
     else if (VoxelType == EVoxelType::Dirt)
     {
         float DirtNoise = FastValueNoise2D(VoxX * 0.1f, VoxY * 0.1f);
@@ -966,7 +980,6 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
     if (!Attr->HasMaterialID()) Attr->EnableMaterialID();
     auto* MaterialIDAttribute = Attr->GetMaterialID();
 
-    // Reverted the TOptional optimization to pre-calculate all 8 corners. Fixes crash immediately.
     FVector v000 = GetSmoothVertexWorld(WorldX, WorldY, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
     FVector v100 = GetSmoothVertexWorld(WorldX + 1, WorldY, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
     FVector v010 = GetSmoothVertexWorld(WorldX, WorldY + 1, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
@@ -1216,7 +1229,6 @@ void ASmoothVoxelTerrain::AppendGrassBladesWorld(int32 WorldX, int32 WorldY, int
                 }
             };
 
-        // Cache a random material value for this blade (can be used for wind variance/color noise inside the Material Graph)
         float RandMat = FastRand.NextFloat();
 
         if (GrassBladeSegments <= 1)
