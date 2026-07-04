@@ -15,8 +15,7 @@ using namespace UE::Geometry;
 static int32 FloorDiv(int32 Dividend, int32 Divisor)
 {
     int32 Quotient = Dividend / Divisor;
-    if ((Dividend ^ Divisor) < 0 && Dividend % Divisor != 0)
-        Quotient--;
+    if ((Dividend ^ Divisor) < 0 && Dividend % Divisor != 0) Quotient--;
     return Quotient;
 }
 
@@ -35,10 +34,7 @@ FORCEINLINE float FastValueNoise2D(float x, float y)
     float fy = y - iy;
     float ux = fx * fx * (3.0f - 2.0f * fx);
     float uy = fy * fy * (3.0f - 2.0f * fy);
-    float a = Hash2D(ix, iy);
-    float b = Hash2D(ix + 1, iy);
-    float c = Hash2D(ix, iy + 1);
-    float d = Hash2D(ix + 1, iy + 1);
+    float a = Hash2D(ix, iy), b = Hash2D(ix + 1, iy), c = Hash2D(ix, iy + 1), d = Hash2D(ix + 1, iy + 1);
     return FMath::Lerp(FMath::Lerp(a, b, ux), FMath::Lerp(c, d, ux), uy);
 }
 
@@ -51,101 +47,24 @@ FORCEINLINE float Hash3D(int32 x, int32 y, int32 z)
 
 FORCEINLINE float FastValueNoise3D(float x, float y, float z)
 {
-    int32 ix = FMath::FloorToInt(x);
-    int32 iy = FMath::FloorToInt(y);
-    int32 iz = FMath::FloorToInt(z);
-    float fx = x - ix;
-    float fy = y - iy;
-    float fz = z - iz;
-    float ux = fx * fx * (3.0f - 2.0f * fx);
-    float uy = fy * fy * (3.0f - 2.0f * fy);
-    float uz = fz * fz * (3.0f - 2.0f * fz);
-    float c000 = Hash3D(ix, iy, iz);
-    float c100 = Hash3D(ix + 1, iy, iz);
-    float c010 = Hash3D(ix, iy + 1, iz);
-    float c110 = Hash3D(ix + 1, iy + 1, iz);
-    float c001 = Hash3D(ix, iy, iz + 1);
-    float c101 = Hash3D(ix + 1, iy, iz + 1);
-    float c011 = Hash3D(ix, iy + 1, iz + 1);
-    float c111 = Hash3D(ix + 1, iy + 1, iz + 1);
-    float r0 = FMath::Lerp(FMath::Lerp(c000, c100, ux), FMath::Lerp(c010, c110, ux), uy);
-    float r1 = FMath::Lerp(FMath::Lerp(c001, c101, ux), FMath::Lerp(c011, c111, ux), uy);
-    return FMath::Lerp(r0, r1, uz);
+    int32 ix = FMath::FloorToInt(x), iy = FMath::FloorToInt(y), iz = FMath::FloorToInt(z);
+    float fx = x - ix, fy = y - iy, fz = z - iz;
+    float ux = fx * fx * (3.0f - 2.0f * fx), uy = fy * fy * (3.0f - 2.0f * fy), uz = fz * fz * (3.0f - 2.0f * fz);
+    float c000 = Hash3D(ix, iy, iz), c100 = Hash3D(ix + 1, iy, iz), c010 = Hash3D(ix, iy + 1, iz), c110 = Hash3D(ix + 1, iy + 1, iz);
+    float c001 = Hash3D(ix, iy, iz + 1), c101 = Hash3D(ix + 1, iy, iz + 1), c011 = Hash3D(ix, iy + 1, iz + 1), c111 = Hash3D(ix + 1, iy + 1, iz + 1);
+    return FMath::Lerp(FMath::Lerp(FMath::Lerp(c000, c100, ux), FMath::Lerp(c010, c110, ux), uy), FMath::Lerp(FMath::Lerp(c001, c101, ux), FMath::Lerp(c011, c111, ux), uy), uz);
 }
 
 FORCEINLINE FLinearColor FastColorLerp(const FLinearColor& A, const FLinearColor& B, float Alpha)
 {
-    return FLinearColor(
-        A.R + (B.R - A.R) * Alpha,
-        A.G + (B.G - A.G) * Alpha,
-        A.B + (B.B - A.B) * Alpha,
-        A.A + (B.A - A.A) * Alpha
-    );
+    return FLinearColor(A.R + (B.R - A.R) * Alpha, A.G + (B.G - A.G) * Alpha, A.B + (B.B - A.B) * Alpha, A.A + (B.A - A.A) * Alpha);
 }
 
 struct FFastRandom
 {
     uint32 State;
     FORCEINLINE FFastRandom(uint32 Seed) : State(Seed) {}
-    FORCEINLINE float NextFloat()
-    {
-        State = State * 1664525U + 1013904223U;
-        return (float)(State & 0x7FFFFFFF) * 4.656612873077392578125e-10f;
-    }
-};
-
-struct FHeightCache
-{
-    int32 StartWorldX = 0;
-    int32 StartWorldY = 0;
-    int32 Size = 0;
-    TArray<float> Heights;
-
-    void Init(int32 InStartWorldX, int32 InStartWorldY, int32 InSize, const ASmoothVoxelTerrain* Terrain)
-    {
-        StartWorldX = InStartWorldX;
-        StartWorldY = InStartWorldY;
-        Size = InSize;
-        Heights.SetNumUninitialized(Size * Size);
-        for (int32 y = 0; y < Size; ++y)
-        {
-            int32 RowOffset = y * Size;
-            int32 WorldY = StartWorldY + y;
-            for (int32 x = 0; x < Size; ++x)
-            {
-                Heights[x + RowOffset] = Terrain->GetHeightAtWorldCorner(StartWorldX + x, WorldY);
-            }
-        }
-    }
-
-    void InitForVoxel(int32 VoxelWorldX, int32 VoxelWorldY, const ASmoothVoxelTerrain* Terrain)
-    {
-        StartWorldX = VoxelWorldX - 2;
-        StartWorldY = VoxelWorldY - 2;
-        Size = 6;
-        Heights.SetNumUninitialized(Size * Size);
-        for (int32 y = 0; y < Size; ++y)
-        {
-            int32 RowOffset = y * Size;
-            int32 WorldY = StartWorldY + y;
-            for (int32 x = 0; x < Size; ++x)
-            {
-                Heights[x + RowOffset] = Terrain->GetHeightAtWorldCorner(StartWorldX + x, WorldY);
-            }
-        }
-    }
-
-    FORCEINLINE float GetHeight(int32 WorldX, int32 WorldY) const
-    {
-        int32 lx = WorldX - StartWorldX;
-        int32 ly = WorldY - StartWorldY;
-#if UE_BUILD_SHIPPING
-        return Heights[lx + ly * Size];
-#else
-        if (lx >= 0 && lx < Size && ly >= 0 && ly < Size) return Heights[lx + ly * Size];
-        return 0.0f;
-#endif
-    }
+    FORCEINLINE float NextFloat() { State = State * 1664525U + 1013904223U; return (float)(State & 0x7FFFFFFF) * 4.656612873077392578125e-10f; }
 };
 
 struct FChunkNeighborhood
@@ -167,13 +86,10 @@ struct FChunkNeighborhood
         if (LocalZ < 0 || LocalZ >= MaxHeight) return EVoxelType::Air;
 
         if (uint32(LocalX) < uint32(ChunkSize) && uint32(LocalY) < uint32(ChunkSize))
-        {
             return SelfData[LocalX + LocalY * StepY + LocalZ * StepZ];
-        }
 
         const EVoxelType* TargetData = SelfData;
-        int32 LX = LocalX;
-        int32 LY = LocalY;
+        int32 LX = LocalX, LY = LocalY;
 
         if (LX < 0) { TargetData = WestData; LX += ChunkSize; }
         else if (LX >= ChunkSize) { TargetData = EastData; LX -= ChunkSize; }
@@ -193,26 +109,19 @@ ASmoothVoxelTerrain::ASmoothVoxelTerrain()
     RootComponent = RootSceneComponent;
 }
 
-ASmoothVoxelTerrain::~ASmoothVoxelTerrain()
-{
-    bIsDestroyed = true;
-}
+ASmoothVoxelTerrain::~ASmoothVoxelTerrain() { bIsDestroyed = true; }
 
 void ASmoothVoxelTerrain::OnConstruction(const FTransform& Transform)
 {
     Super::OnConstruction(Transform);
-    if (bIsDestroyed || HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject) || !GetWorld() || GetWorld()->bIsTearingDown || IsActorBeingDestroyed())
-        return;
+    if (bIsDestroyed || HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject) || !GetWorld() || GetWorld()->bIsTearingDown || IsActorBeingDestroyed()) return;
     RebuildTerrain();
 }
 
 void ASmoothVoxelTerrain::BeginPlay()
 {
     Super::BeginPlay();
-    if (Chunks.Num() == 0)
-    {
-        RebuildTerrain();
-    }
+    if (Chunks.Num() == 0) RebuildTerrain();
 }
 
 void ASmoothVoxelTerrain::Tick(float DeltaTime)
@@ -226,8 +135,18 @@ void ASmoothVoxelTerrain::Tick(float DeltaTime)
         TimeSinceLastUpdate = 0.0f;
         UpdateProceduralTerrain();
     }
-
     ProcessGenerationQueue();
+    UpdateCollisionIfNeeded();
+}
+
+void ASmoothVoxelTerrain::UpdateCollisionIfNeeded()
+{
+    if (bCollisionDirty)
+    {
+        for (auto& Pair : Chunks)
+            if (Pair.Value && Pair.Value->MeshComponent) Pair.Value->MeshComponent->UpdateCollision(false);
+        bCollisionDirty = false;
+    }
 }
 
 void ASmoothVoxelTerrain::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -261,19 +180,13 @@ void ASmoothVoxelTerrain::GenerateChunks()
 
     TArray<UDynamicMeshComponent*> OldComps;
     GetComponents<UDynamicMeshComponent>(OldComps);
-    for (UDynamicMeshComponent* Comp : OldComps)
-    {
-        Comp->UnregisterComponent();
-        Comp->DestroyComponent();
-    }
+    for (UDynamicMeshComponent* Comp : OldComps) { Comp->UnregisterComponent(); Comp->DestroyComponent(); }
 
     FVector PlayerPos = GetActorLocation();
     if (GetWorld())
     {
         if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
-        {
             if (APawn* Pawn = PC->GetPawnOrSpectator()) PlayerPos = Pawn->GetActorLocation();
-        }
     }
 
     FIntVector PlayerChunk = WorldToChunkCoord(PlayerPos);
@@ -281,36 +194,18 @@ void ASmoothVoxelTerrain::GenerateChunks()
 
     const int32 SafeSpawnRadius = 1;
     for (int32 dx = -SafeSpawnRadius; dx <= SafeSpawnRadius; ++dx)
-    {
         for (int32 dy = -SafeSpawnRadius; dy <= SafeSpawnRadius; ++dy)
-        {
-            FIntVector SpawnCoord(PlayerChunk.X + dx, PlayerChunk.Y + dy, 0);
-            GenerateSingleChunk(SpawnCoord);
-        }
-    }
+            GenerateSingleChunk(FIntVector(PlayerChunk.X + dx, PlayerChunk.Y + dy, 0));
 
     TSet<FIntVector> TargetCoords;
     for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
-    {
         for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
-        {
-            if (dx * dx + dy * dy <= RenderDistance * RenderDistance)
-            {
-                TargetCoords.Add(FIntVector(PlayerChunk.X + dx, PlayerChunk.Y + dy, 0));
-            }
-        }
-    }
+            if (dx * dx + dy * dy <= RenderDistance * RenderDistance) TargetCoords.Add(FIntVector(PlayerChunk.X + dx, PlayerChunk.Y + dy, 0));
 
     for (const FIntVector& Coord : TargetCoords)
-    {
         if (!Chunks.Contains(Coord)) GenerationQueue.Add(Coord);
-    }
 
-    GenerationQueue.Sort([PlayerChunk](const FIntVector& A, const FIntVector& B) {
-        int32 DistA = FMath::Square(A.X - PlayerChunk.X) + FMath::Square(A.Y - PlayerChunk.Y);
-        int32 DistB = FMath::Square(B.X - PlayerChunk.X) + FMath::Square(B.Y - PlayerChunk.Y);
-        return DistA < DistB;
-        });
+    GenerationQueue.Sort([PlayerChunk](const FIntVector& A, const FIntVector& B) { return FMath::Square(A.X - PlayerChunk.X) + FMath::Square(A.Y - PlayerChunk.Y) < FMath::Square(B.X - PlayerChunk.X) + FMath::Square(B.Y - PlayerChunk.Y); });
 }
 
 void ASmoothVoxelTerrain::UpdateProceduralTerrain()
@@ -319,65 +214,41 @@ void ASmoothVoxelTerrain::UpdateProceduralTerrain()
     if (GetWorld())
     {
         if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
-        {
             if (APawn* Pawn = PC->GetPawnOrSpectator()) PlayerPos = Pawn->GetActorLocation();
-        }
     }
 
     FIntVector PlayerChunk = WorldToChunkCoord(PlayerPos);
-
     int32 GrassDistSq = FMath::Square(GrassRenderDistance);
+
     for (auto& Pair : Chunks)
     {
         if (Pair.Value && Pair.Value->GrassMeshComponent)
         {
             int32 DistSq = FMath::Square(Pair.Key.X - PlayerChunk.X) + FMath::Square(Pair.Key.Y - PlayerChunk.Y);
             bool bShouldBeVisible = bEnableGrassGeometry && (DistSq <= GrassDistSq);
-
-            if (Pair.Value->GrassMeshComponent->IsVisible() != bShouldBeVisible)
-            {
-                Pair.Value->GrassMeshComponent->SetVisibility(bShouldBeVisible);
-            }
+            if (Pair.Value->GrassMeshComponent->IsVisible() != bShouldBeVisible) Pair.Value->GrassMeshComponent->SetVisibility(bShouldBeVisible);
         }
     }
 
     if (PlayerChunk != LastPlayerChunkCoord)
     {
         LastPlayerChunkCoord = PlayerChunk;
-
         TSet<FIntVector> DesiredCoords;
         for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
-        {
             for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
-            {
-                if (dx * dx + dy * dy <= RenderDistance * RenderDistance)
-                {
-                    DesiredCoords.Add(FIntVector(PlayerChunk.X + dx, PlayerChunk.Y + dy, 0));
-                }
-            }
-        }
+                if (dx * dx + dy * dy <= RenderDistance * RenderDistance) DesiredCoords.Add(FIntVector(PlayerChunk.X + dx, PlayerChunk.Y + dy, 0));
 
         TArray<FIntVector> CoordsToUnload;
         for (const auto& Pair : Chunks)
-        {
-            FIntVector Coord = Pair.Key;
-            float DistSq = FMath::Square(Coord.X - PlayerChunk.X) + FMath::Square(Coord.Y - PlayerChunk.Y);
-            if (DistSq > FMath::Square(UnloadDistance)) CoordsToUnload.Add(Coord);
-        }
+            if (FMath::Square(Pair.Key.X - PlayerChunk.X) + FMath::Square(Pair.Key.Y - PlayerChunk.Y) > FMath::Square(UnloadDistance)) CoordsToUnload.Add(Pair.Key);
 
         for (const FIntVector& Coord : CoordsToUnload) UnloadChunk(Coord);
 
         GenerationQueue.Empty();
         for (const FIntVector& Coord : DesiredCoords)
-        {
             if (!Chunks.Contains(Coord)) GenerationQueue.Add(Coord);
-        }
 
-        GenerationQueue.Sort([PlayerChunk](const FIntVector& A, const FIntVector& B) {
-            int32 DistA = FMath::Square(A.X - PlayerChunk.X) + FMath::Square(A.Y - PlayerChunk.Y);
-            int32 DistB = FMath::Square(B.X - PlayerChunk.X) + FMath::Square(B.Y - PlayerChunk.Y);
-            return DistA < DistB;
-            });
+        GenerationQueue.Sort([PlayerChunk](const FIntVector& A, const FIntVector& B) { return FMath::Square(A.X - PlayerChunk.X) + FMath::Square(A.Y - PlayerChunk.Y) < FMath::Square(B.X - PlayerChunk.X) + FMath::Square(B.Y - PlayerChunk.Y); });
     }
 }
 
@@ -419,7 +290,7 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
     MeshComp->SetCollisionProfileName(CollisionProfileName);
     MeshComp->SetGenerateOverlapEvents(bGenerateOverlapEvents);
     MeshComp->bUseAsyncCooking = true;
-    MeshComp->bDeferCollisionUpdates = true; // Optimization
+    MeshComp->bDeferCollisionUpdates = true;
 
     if (GrassMaterial) MeshComp->SetMaterial(0, GrassMaterial);
     if (DirtMaterial) MeshComp->SetMaterial(1, DirtMaterial);
@@ -453,8 +324,6 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
             ASmoothVoxelTerrain* Terrain = WeakThis.Get();
             if (!Terrain || Terrain->bIsDestroyed) return;
 
-            double DataStart = FPlatformTime::Seconds();
-
             int32 LocalChunkSize = Terrain->ChunkSize;
             int32 LocalMaxHeight = Terrain->MaxHeight;
             float LocalMinGrassThickness = Terrain->MinGrassThickness;
@@ -462,17 +331,17 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
             TArray<EVoxelType> LocalVoxelData;
             LocalVoxelData.SetNumZeroed(LocalChunkSize * LocalChunkSize * LocalMaxHeight);
 
-            TArray<float> LocalHeights;
-            LocalHeights.SetNumUninitialized((LocalChunkSize + 1) * (LocalChunkSize + 1));
+            int32 CacheSize = LocalChunkSize + 3;
+            TArray<float> LocalHeightMap;
+            LocalHeightMap.SetNumUninitialized(CacheSize * CacheSize);
 
-            for (int32 ly = 0; ly <= LocalChunkSize; ++ly)
+            for (int32 y = 0; y < CacheSize; ++y)
             {
-                int32 RowOffset = ly * (LocalChunkSize + 1);
-                int32 WorldY = ChunkCoord.Y * LocalChunkSize + ly;
-                for (int32 lx = 0; lx <= LocalChunkSize; ++lx)
+                int32 WorldY = ChunkCoord.Y * LocalChunkSize - 1 + y;
+                for (int32 x = 0; x < CacheSize; ++x)
                 {
-                    int32 WorldX = ChunkCoord.X * LocalChunkSize + lx;
-                    LocalHeights[lx + RowOffset] = Terrain->GetHeightAtWorldCorner(WorldX, WorldY);
+                    int32 WorldX = ChunkCoord.X * LocalChunkSize - 1 + x;
+                    LocalHeightMap[x + y * CacheSize] = Terrain->GetHeightAtWorldCorner(WorldX, WorldY);
                 }
             }
 
@@ -480,10 +349,11 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
             {
                 for (int32 ly = 0; ly < LocalChunkSize; ++ly)
                 {
-                    float h00 = LocalHeights[lx + ly * (LocalChunkSize + 1)];
-                    float h10 = LocalHeights[(lx + 1) + ly * (LocalChunkSize + 1)];
-                    float h01 = LocalHeights[lx + (ly + 1) * (LocalChunkSize + 1)];
-                    float h11 = LocalHeights[(lx + 1) + (ly + 1) * (LocalChunkSize + 1)];
+                    float h00 = LocalHeightMap[(lx + 1) + (ly + 1) * CacheSize];
+                    float h10 = LocalHeightMap[(lx + 2) + (ly + 1) * CacheSize];
+                    float h01 = LocalHeightMap[(lx + 1) + (ly + 2) * CacheSize];
+                    float h11 = LocalHeightMap[(lx + 2) + (ly + 2) * CacheSize];
+
                     float MinCorner = FMath::Min3(h00, h10, FMath::Min(h01, h11));
                     int32 GroundLevel = FMath::Clamp(FMath::FloorToInt(MinCorner - LocalMinGrassThickness), 0, LocalMaxHeight - 1);
 
@@ -504,9 +374,7 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
                 }
             }
 
-            double DataEnd = FPlatformTime::Seconds();
-
-            AsyncTask(ENamedThreads::GameThread, [WeakThis, ChunkCoord, LocalVoxelData = MoveTemp(LocalVoxelData), DataStart, DataEnd]() mutable
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, ChunkCoord, LocalVoxelData = MoveTemp(LocalVoxelData), LocalHeightMap = MoveTemp(LocalHeightMap)]() mutable
                 {
                     ASmoothVoxelTerrain* Terrain = WeakThis.Get();
                     if (!Terrain || Terrain->bIsDestroyed) return;
@@ -515,9 +383,22 @@ void ASmoothVoxelTerrain::GenerateSingleChunk(const FIntVector& ChunkCoord)
                     if (!TargetChunk) return;
 
                     TargetChunk->VoxelData = MoveTemp(LocalVoxelData);
+                    TargetChunk->HeightMap = MoveTemp(LocalHeightMap);
 
-                    UE_LOG(LogTemp, Warning, TEXT("[PERF] Chunk %s - Voxel Data Gen: %.2f ms"), *ChunkCoord.ToString(), (DataEnd - DataStart) * 1000.0);
                     TargetChunk->BuildMesh(Terrain);
+
+                    FIntVector Neighbors[4] = {
+                        FIntVector(ChunkCoord.X - 1, ChunkCoord.Y, 0),
+                        FIntVector(ChunkCoord.X + 1, ChunkCoord.Y, 0),
+                        FIntVector(ChunkCoord.X, ChunkCoord.Y - 1, 0),
+                        FIntVector(ChunkCoord.X, ChunkCoord.Y + 1, 0)
+                    };
+
+                    for (const FIntVector& NeighborCoord : Neighbors)
+                    {
+                        if (FVoxelChunk* Neighbor = Terrain->GetChunk(NeighborCoord))
+                            Neighbor->BuildMesh(Terrain);
+                    }
                 });
         });
 }
@@ -529,16 +410,8 @@ void ASmoothVoxelTerrain::UnloadChunk(const FIntVector& Coord)
     {
         if (Chunk)
         {
-            if (Chunk->MeshComponent && IsValid(Chunk->MeshComponent))
-            {
-                Chunk->MeshComponent->UnregisterComponent();
-                Chunk->MeshComponent->DestroyComponent();
-            }
-            if (Chunk->GrassMeshComponent && IsValid(Chunk->GrassMeshComponent))
-            {
-                Chunk->GrassMeshComponent->UnregisterComponent();
-                Chunk->GrassMeshComponent->DestroyComponent();
-            }
+            if (Chunk->MeshComponent && IsValid(Chunk->MeshComponent)) { Chunk->MeshComponent->UnregisterComponent(); Chunk->MeshComponent->DestroyComponent(); }
+            if (Chunk->GrassMeshComponent && IsValid(Chunk->GrassMeshComponent)) { Chunk->GrassMeshComponent->UnregisterComponent(); Chunk->GrassMeshComponent->DestroyComponent(); }
         }
     }
 }
@@ -547,15 +420,12 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
 {
     if (!MeshComponent || !GrassMeshComponent) return;
 
-    double StartTime = FPlatformTime::Seconds();
-
     TArray<EVoxelType> SelfDataCopy = VoxelData;
+    TArray<float> HeightMapCopy = HeightMap;
     TArray<EVoxelType> WestData, EastData, SouthData, NorthData;
 
     auto RetrieveData = [&](const FIntVector& Offset, TArray<EVoxelType>& OutData) {
-        if (const FVoxelChunk* Target = TerrainOwner->GetChunk(Coord + Offset)) {
-            OutData = Target->VoxelData;
-        }
+        if (const FVoxelChunk* Target = TerrainOwner->GetChunk(Coord + Offset)) OutData = Target->VoxelData;
         };
     RetrieveData(FIntVector(-1, 0, 0), WestData);
     RetrieveData(FIntVector(1, 0, 0), EastData);
@@ -565,14 +435,11 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
     FIntVector LocalCoord = Coord;
     TWeakObjectPtr<ASmoothVoxelTerrain> WeakTerrain(TerrainOwner);
 
-    Async(EAsyncExecution::ThreadPool, [WeakTerrain, LocalCoord, SelfDataCopy = MoveTemp(SelfDataCopy),
-        WestData = MoveTemp(WestData), EastData = MoveTemp(EastData),
-        SouthData = MoveTemp(SouthData), NorthData = MoveTemp(NorthData), StartTime]() mutable
+    Async(EAsyncExecution::ThreadPool, [WeakTerrain, LocalCoord, SelfDataCopy = MoveTemp(SelfDataCopy), HeightMapCopy = MoveTemp(HeightMapCopy),
+        WestData = MoveTemp(WestData), EastData = MoveTemp(EastData), SouthData = MoveTemp(SouthData), NorthData = MoveTemp(NorthData)]() mutable
         {
             ASmoothVoxelTerrain* Terrain = WeakTerrain.Get();
             if (!Terrain || Terrain->bIsDestroyed) return;
-
-            double AsyncMeshStart = FPlatformTime::Seconds();
 
             FDynamicMesh3 LocalMesh;
             LocalMesh.EnableAttributes();
@@ -601,17 +468,15 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
             MockSelf.Coord = LocalCoord;
             Neighborhood.Self = &MockSelf;
 
-            FHeightCache HeightCache;
-            if (Terrain->bSmoothTerrain) {
-                HeightCache.Init(LocalCoord.X * Terrain->ChunkSize - 1, LocalCoord.Y * Terrain->ChunkSize - 1, Terrain->ChunkSize + 3, Terrain);
-            }
+            FLocalHeightGrid HeightGrid;
+            HeightGrid.Heights = HeightMapCopy.GetData();
+            HeightGrid.CacheSize = Terrain->ChunkSize + 3;
 
             TMap<int32, FTriIDArray> NewVoxelTriangles;
             TMap<int32, FTriIDArray> NewGrassTriangles;
 
             FTriIDArray TempTriIDs;
 
-            // Optimal Array Access: Z -> Y -> X
             for (int32 lz = 0; lz < Terrain->MaxHeight; ++lz)
             {
                 int32 ZOffset = lz * Neighborhood.StepZ;
@@ -625,50 +490,26 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
 
                         if (VType == EVoxelType::Air) continue;
 
-                        if (lx > 0 && lx < Terrain->ChunkSize - 1 && ly > 0 && ly < Terrain->ChunkSize - 1 && lz > 0 && lz < Terrain->MaxHeight - 1)
-                        {
-                            if (Neighborhood.SelfData[Index - Neighborhood.StepZ] != EVoxelType::Air &&
-                                Neighborhood.SelfData[Index + Neighborhood.StepZ] != EVoxelType::Air &&
-                                Neighborhood.SelfData[Index - 1] != EVoxelType::Air &&
-                                Neighborhood.SelfData[Index + 1] != EVoxelType::Air &&
-                                Neighborhood.SelfData[Index - Terrain->ChunkSize] != EVoxelType::Air &&
-                                Neighborhood.SelfData[Index + Terrain->ChunkSize] != EVoxelType::Air)
-                            {
-                                continue;
-                            }
-                        }
-
-                        int32 WorldX = LocalCoord.X * Terrain->ChunkSize + lx;
-                        int32 WorldY = LocalCoord.Y * Terrain->ChunkSize + ly;
-
                         TempTriIDs.Reset();
-                        Terrain->AppendVoxelFacesWorld(WorldX, WorldY, lz, LocalMesh, TempTriIDs, HeightCache, Neighborhood);
-
-                        if (TempTriIDs.Num() > 0)
-                        {
-                            NewVoxelTriangles.Add(Index, TempTriIDs);
-                        }
+                        Terrain->AppendVoxelFacesLocal(lx, ly, lz, LocalMesh, TempTriIDs, HeightGrid, Neighborhood, LocalCoord);
+                        if (TempTriIDs.Num() > 0) NewVoxelTriangles.Add(Index, TempTriIDs);
 
                         if (Terrain->bEnableGrassGeometry && VType == EVoxelType::Grass)
                         {
                             if (Neighborhood.SelfData[Index + Neighborhood.StepZ] == EVoxelType::Air)
                             {
                                 TempTriIDs.Reset();
-                                Terrain->AppendGrassBladesWorld(WorldX, WorldY, lz, LocalGrassMesh, TempTriIDs, HeightCache, Neighborhood);
-
-                                if (TempTriIDs.Num() > 0)
-                                {
-                                    NewGrassTriangles.Add(Index, TempTriIDs);
-                                }
+                                Terrain->AppendGrassBladesLocal(lx, ly, lz, LocalGrassMesh, TempTriIDs, HeightGrid, Neighborhood, LocalCoord);
+                                if (TempTriIDs.Num() > 0) NewGrassTriangles.Add(Index, TempTriIDs);
                             }
                         }
                     }
                 }
             }
 
-            double AsyncMeshEnd = FPlatformTime::Seconds();
+            FMeshNormals::QuickComputeVertexNormals(LocalGrassMesh);
 
-            AsyncTask(ENamedThreads::GameThread, [WeakTerrain, LocalCoord, LocalMesh = MoveTemp(LocalMesh), LocalGrassMesh = MoveTemp(LocalGrassMesh), NewVoxelTriangles = MoveTemp(NewVoxelTriangles), NewGrassTriangles = MoveTemp(NewGrassTriangles), StartTime, AsyncMeshStart, AsyncMeshEnd]() mutable
+            AsyncTask(ENamedThreads::GameThread, [WeakTerrain, LocalCoord, LocalMesh = MoveTemp(LocalMesh), LocalGrassMesh = MoveTemp(LocalGrassMesh), NewVoxelTriangles = MoveTemp(NewVoxelTriangles), NewGrassTriangles = MoveTemp(NewGrassTriangles)]() mutable
                 {
                     ASmoothVoxelTerrain* Terrain = WeakTerrain.Get();
                     if (!Terrain || Terrain->bIsDestroyed) return;
@@ -676,24 +517,13 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
                     FVoxelChunk* Chunk = Terrain->GetChunk(LocalCoord);
                     if (!Chunk || !Chunk->MeshComponent || !Chunk->GrassMeshComponent) return;
 
-                    double GTAssignStart = FPlatformTime::Seconds();
-
                     Chunk->VoxelTriangles = MoveTemp(NewVoxelTriangles);
                     Chunk->GrassVoxelTriangles = MoveTemp(NewGrassTriangles);
 
-                    // 0ms SetMesh direct memory swap (No EditMesh tracking locking)
                     Chunk->MeshComponent->SetMesh(MoveTemp(LocalMesh));
                     Chunk->GrassMeshComponent->SetMesh(MoveTemp(LocalGrassMesh));
 
-                    // Asynchronous collision physics compilation just for this singular chunk
                     Chunk->MeshComponent->UpdateCollision(true);
-
-                    double FinalTime = FPlatformTime::Seconds();
-                    float AsyncMS = (AsyncMeshEnd - AsyncMeshStart) * 1000.0f;
-                    float GTWorkMS = (FinalTime - GTAssignStart) * 1000.0f;
-                    float QueueDelayMS = ((GTAssignStart - StartTime) * 1000.0f) - AsyncMS;
-
-                    UE_LOG(LogTemp, Warning, TEXT("[PERF] Chunk %s - Async Build: %.2f ms | GT Swap: %.2f ms (Queue Delay: %.2f ms)"), *LocalCoord.ToString(), AsyncMS, GTWorkMS, FMath::Max(0.0f, QueueDelayMS));
                 });
         });
 }
@@ -715,6 +545,7 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateSharedFace(int32 LocalX, int32 Loca
                     AddVoxelFaces(LocalX, LocalY, LocalZ, MeshOut, GrassMeshOut, TerrainOwner);
                 });
         });
+
     MeshComponent->UpdateCollision(true);
 }
 
@@ -722,7 +553,6 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxel(int32 LocalX, int32 LocalY, i
 {
     int32 Index = LocalX + LocalY * TerrainOwner->ChunkSize + LocalZ * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize;
     if (VoxelData[Index] == NewType) return;
-
     UpdateVoxelMesh(LocalX, LocalY, LocalZ, NewType, TerrainOwner);
 }
 
@@ -751,7 +581,6 @@ void ASmoothVoxelTerrain::RemoveVoxel(FVector WorldLocation)
     int32 Index = lx + ly * ChunkSize + lz * ChunkSize * ChunkSize;
     if (Chunk->VoxelData[Index] == EVoxelType::Air) return;
 
-    double Start = FPlatformTime::Seconds();
     Chunk->UpdateVoxel(lx, ly, lz, EVoxelType::Air, this);
 
     if (lx == 0) { if (FVoxelChunk* Neighbor = GetChunk(ChunkCoord + FIntVector(-1, 0, 0))) Neighbor->UpdateSharedFace(ChunkSize - 1, ly, lz, this, FIntVector(1, 0, 0)); }
@@ -760,9 +589,6 @@ void ASmoothVoxelTerrain::RemoveVoxel(FVector WorldLocation)
     if (ly == ChunkSize - 1) { if (FVoxelChunk* Neighbor = GetChunk(ChunkCoord + FIntVector(0, 1, 0))) Neighbor->UpdateSharedFace(lx, 0, lz, this, FIntVector(0, -1, 0)); }
     if (lz == 0) { if (FVoxelChunk* Neighbor = GetChunk(ChunkCoord + FIntVector(0, 0, -1))) Neighbor->UpdateSharedFace(lx, ly, MaxHeight - 1, this, FIntVector(0, 0, 1)); }
     if (lz == MaxHeight - 1) { if (FVoxelChunk* Neighbor = GetChunk(ChunkCoord + FIntVector(0, 0, 1))) Neighbor->UpdateSharedFace(lx, ly, 0, this, FIntVector(0, 0, -1)); }
-
-    double End = FPlatformTime::Seconds();
-    UE_LOG(LogTemp, Warning, TEXT("[PERF] RemoveVoxel Local Modify took %.2f ms"), (End - Start) * 1000.0);
 }
 
 void ASmoothVoxelTerrain::PlaceVoxel(FVector WorldLocation, EVoxelType Type)
@@ -838,66 +664,57 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
     return (NoiseValue + 1.0f) * HeightMultiplier / CubeSize;
 }
 
-float ASmoothVoxelTerrain::GetInterpolatedHeight(float WorldX, float WorldY) const
+float ASmoothVoxelTerrain::GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const
 {
-    int32 x0 = FMath::FloorToInt(WorldX);
-    int32 y0 = FMath::FloorToInt(WorldY);
-    float fx = WorldX - x0;
-    float fy = WorldY - y0;
-    float h00 = GetHeightAtWorldCorner(x0, y0);
-    float h10 = GetHeightAtWorldCorner(x0 + 1, y0);
-    float h01 = GetHeightAtWorldCorner(x0, y0 + 1);
-    float h11 = GetHeightAtWorldCorner(x0 + 1, y0 + 1);
+    int32 x0 = FMath::FloorToInt(LocalX);
+    int32 y0 = FMath::FloorToInt(LocalY);
+    float fx = LocalX - x0;
+    float fy = LocalY - y0;
+    float h00 = HeightGrid.GetHeight(x0, y0);
+    float h10 = HeightGrid.GetHeight(x0 + 1, y0);
+    float h01 = HeightGrid.GetHeight(x0, y0 + 1);
+    float h11 = HeightGrid.GetHeight(x0 + 1, y0 + 1);
     return FMath::Lerp(FMath::Lerp(h00, h10, fx), FMath::Lerp(h01, h11, fx), fy);
 }
 
-float ASmoothVoxelTerrain::GetInterpolatedHeightCached(float WorldX, float WorldY, const FHeightCache& HeightCache) const
+FVector ASmoothVoxelTerrain::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const
 {
-    int32 x0 = FMath::FloorToInt(WorldX);
-    int32 y0 = FMath::FloorToInt(WorldY);
-    float fx = WorldX - x0;
-    float fy = WorldY - y0;
-    float h00 = HeightCache.GetHeight(x0, y0);
-    float h10 = HeightCache.GetHeight(x0 + 1, y0);
-    float h01 = HeightCache.GetHeight(x0, y0 + 1);
-    float h11 = HeightCache.GetHeight(x0 + 1, y0 + 1);
-    return FMath::Lerp(FMath::Lerp(h00, h10, fx), FMath::Lerp(h01, h11, fx), fy);
-}
+    int32 WorldX = ChunkCoord.X * ChunkSize + VertX;
+    int32 WorldY = ChunkCoord.Y * ChunkSize + VertY;
 
-FVector ASmoothVoxelTerrain::GetSmoothVertexWorld(int32 WorldX, int32 WorldY, int32 WorldZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FHeightCache& HeightCache, const FChunkNeighborhood& Neighborhood) const
-{
-    if (!bSmoothTerrain) return FVector(WorldX, WorldY, WorldZ) * CubeSize;
-    float TargetH = HeightCache.GetHeight(WorldX, WorldY);
-    float FinalZ = (float)WorldZ;
-    int32 LocalVoxX = VoxX - Neighborhood.Self->Coord.X * ChunkSize;
-    int32 LocalVoxY = VoxY - Neighborhood.Self->Coord.Y * ChunkSize;
+    if (!bSmoothTerrain) return FVector(WorldX, WorldY, VertZ) * CubeSize;
 
-    if (Neighborhood.GetVoxel(LocalVoxX, LocalVoxY, VoxZ) == EVoxelType::Grass && WorldZ > VoxZ)
+    float TargetH = HeightGrid.GetHeight(VertX, VertY);
+    float FinalZ = (float)VertZ;
+
+    if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) == EVoxelType::Grass && VertZ > VoxZ)
     {
-        if (Neighborhood.GetVoxel(LocalVoxX, LocalVoxY, VoxZ + 1) != EVoxelType::Air) return FVector(WorldX, WorldY, WorldZ) * CubeSize;
+        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) != EVoxelType::Air) return FVector(WorldX, WorldY, VertZ) * CubeSize;
         FinalZ = TargetH;
     }
     return FVector(WorldX, WorldY, FinalZ) * CubeSize;
 }
 
-FVector ASmoothVoxelTerrain::GetSmoothNormalWorld(int32 WorldX, int32 WorldY, const FHeightCache& HeightCache) const
+FVector ASmoothVoxelTerrain::GetSmoothNormalLocal(int32 VertX, int32 VertY, const FLocalHeightGrid& HeightGrid) const
 {
-    float hL = HeightCache.GetHeight(WorldX - 1, WorldY);
-    float hR = HeightCache.GetHeight(WorldX + 1, WorldY);
-    float hD = HeightCache.GetHeight(WorldX, WorldY - 1);
-    float hU = HeightCache.GetHeight(WorldX, WorldY + 1);
+    float hL = HeightGrid.GetHeight(VertX - 1, VertY);
+    float hR = HeightGrid.GetHeight(VertX + 1, VertY);
+    float hD = HeightGrid.GetHeight(VertX, VertY - 1);
+    float hU = HeightGrid.GetHeight(VertX, VertY + 1);
     return FVector(hL - hR, hD - hU, 2.0f).GetSafeNormal();
 }
 
-float ASmoothVoxelTerrain::GetNeighborTopHeightWorld(int32 WorldX, int32 WorldY, int32 WorldZ, const FVector& Vertex, const FChunkNeighborhood& Neighborhood, const FHeightCache& HeightCache) const
+float ASmoothVoxelTerrain::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalHeightGrid& HeightGrid) const
 {
-    int32 LocalX = WorldX - Neighborhood.Self->Coord.X * ChunkSize;
-    int32 LocalY = WorldY - Neighborhood.Self->Coord.Y * ChunkSize;
-    EVoxelType neighborType = Neighborhood.GetVoxel(LocalX, LocalY, WorldZ);
-
+    EVoxelType neighborType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ);
     if (neighborType == EVoxelType::Air) return -FLT_MAX;
-    else if (neighborType == EVoxelType::Grass) return GetInterpolatedHeightCached((float)Vertex.X / CubeSize, (float)Vertex.Y / CubeSize, HeightCache) * CubeSize;
-    return (WorldZ + 1) * CubeSize;
+    else if (neighborType == EVoxelType::Grass)
+    {
+        float LocalVertX = (float)VertexLocalPos.X / CubeSize - Neighborhood.Self->Coord.X * ChunkSize;
+        float LocalVertY = (float)VertexLocalPos.Y / CubeSize - Neighborhood.Self->Coord.Y * ChunkSize;
+        return GetInterpolatedHeightLocal(LocalVertX, LocalVertY, HeightGrid) * CubeSize;
+    }
+    return (LocalZ + 1) * CubeSize;
 }
 
 FLinearColor ASmoothVoxelTerrain::GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const
@@ -920,69 +737,23 @@ FLinearColor ASmoothVoxelTerrain::GetStylizedColorForVoxel(const FVector& WorldP
     return FLinearColor::White;
 }
 
-void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int32 WorldZ, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FHeightCache& HeightCache, const FChunkNeighborhood& Neighborhood)
+void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord)
 {
     FDynamicMeshAttributeSet* Attr = Mesh.Attributes();
     if (!Attr) return;
     FDynamicMeshUVOverlay* UVOverlay = Attr->GetUVLayer(0);
     FDynamicMeshNormalOverlay* NormalOverlay = Attr->PrimaryNormals();
     FDynamicMeshColorOverlay* ColorOverlay = Attr->PrimaryColors();
-    if (!UVOverlay || !NormalOverlay || !ColorOverlay) return;
-
-    if (!Attr->HasMaterialID()) Attr->EnableMaterialID();
     auto* MaterialIDAttribute = Attr->GetMaterialID();
 
-    int32 LocalX = WorldX - Neighborhood.Self->Coord.X * ChunkSize;
-    int32 LocalY = WorldY - Neighborhood.Self->Coord.Y * ChunkSize;
+    EVoxelType CurrentType = Neighborhood.GetVoxel(lx, ly, lz);
+    if (CurrentType == EVoxelType::Air) return;
 
-    EVoxelType CurrentType = Neighborhood.GetVoxel(LocalX, LocalY, WorldZ);
-    FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)WorldZ * CubeSize), CurrentType);
+    int32 WorldX = ChunkCoord.X * ChunkSize + lx;
+    int32 WorldY = ChunkCoord.Y * ChunkSize + ly;
+    FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)lz * CubeSize), CurrentType);
 
     int32 cIdx = ColorOverlay->AppendElement(FVector4f(VoxelColor));
-
-    auto AddQuadWorldFast = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector3f& FixedNormal, int32 MatID, int32 UAxis, int32 VAxis)
-        {
-            FVector2D uvA((float)A[UAxis] / CubeSize * TextureScale, (float)A[VAxis] / CubeSize * TextureScale);
-            FVector2D uvB((float)B[UAxis] / CubeSize * TextureScale, (float)B[VAxis] / CubeSize * TextureScale);
-            FVector2D uvC((float)C[UAxis] / CubeSize * TextureScale, (float)C[VAxis] / CubeSize * TextureScale);
-            FVector2D uvD((float)D[UAxis] / CubeSize * TextureScale, (float)D[VAxis] / CubeSize * TextureScale);
-
-            int32 vA = Mesh.AppendVertex(FVector3d(A)), vB = Mesh.AppendVertex(FVector3d(B));
-            int32 vC = Mesh.AppendVertex(FVector3d(C)), vD = Mesh.AppendVertex(FVector3d(D));
-
-            int32 nIdx = NormalOverlay->AppendElement(FixedNormal);
-
-            int32 t1 = Mesh.AppendTriangle(vA, vB, vC);
-            if (t1 != FDynamicMesh3::InvalidID)
-            {
-                OutTriIDs.Add(t1);
-                NormalOverlay->SetTriangle(t1, FIndex3i(nIdx, nIdx, nIdx));
-                int32 uvA1 = UVOverlay->AppendElement(FVector2f(uvA)), uvB1 = UVOverlay->AppendElement(FVector2f(uvB)), uvC1 = UVOverlay->AppendElement(FVector2f(uvC));
-                UVOverlay->SetTriangle(t1, FIndex3i(uvA1, uvB1, uvC1));
-                ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
-                if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
-            }
-
-            int32 t2 = Mesh.AppendTriangle(vA, vC, vD);
-            if (t2 != FDynamicMesh3::InvalidID)
-            {
-                OutTriIDs.Add(t2);
-                NormalOverlay->SetTriangle(t2, FIndex3i(nIdx, nIdx, nIdx));
-                int32 uvA2 = UVOverlay->AppendElement(FVector2f(uvA)), uvC2 = UVOverlay->AppendElement(FVector2f(uvC)), uvD2 = UVOverlay->AppendElement(FVector2f(uvD));
-                UVOverlay->SetTriangle(t2, FIndex3i(uvA2, uvC2, uvD2));
-                ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
-                if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
-            }
-        };
-
-    bool bExposedTop = Neighborhood.GetVoxel(LocalX, LocalY, WorldZ + 1) == EVoxelType::Air;
-    bool bExposedBottom = Neighborhood.GetVoxel(LocalX, LocalY, WorldZ - 1) == EVoxelType::Air;
-    bool bExposedEast = Neighborhood.GetVoxel(LocalX + 1, LocalY, WorldZ) == EVoxelType::Air;
-    bool bExposedWest = Neighborhood.GetVoxel(LocalX - 1, LocalY, WorldZ) == EVoxelType::Air;
-    bool bExposedNorth = Neighborhood.GetVoxel(LocalX, LocalY + 1, WorldZ) == EVoxelType::Air;
-    bool bExposedSouth = Neighborhood.GetVoxel(LocalX, LocalY - 1, WorldZ) == EVoxelType::Air;
-
-    if (!bExposedTop && !bExposedBottom && !bExposedEast && !bExposedWest && !bExposedNorth && !bExposedSouth) return;
 
     int32 TopMatID = 1, BottomMatID = 1, SideMatID = 1;
     if (CurrentType == EVoxelType::Grass) { TopMatID = 0; BottomMatID = SideMatID = 1; }
@@ -991,15 +762,51 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
 
     if (!bSmoothTerrain)
     {
-        FVector Origin((double)WorldX * CubeSize, (double)WorldY * CubeSize, (double)WorldZ * CubeSize);
-        FVector p000 = Origin;
-        FVector p100 = Origin + FVector(CubeSize, 0, 0);
-        FVector p010 = Origin + FVector(0, CubeSize, 0);
-        FVector p110 = Origin + FVector(CubeSize, CubeSize, 0);
-        FVector p001 = Origin + FVector(0, 0, CubeSize);
-        FVector p101 = Origin + FVector(CubeSize, 0, CubeSize);
-        FVector p011 = Origin + FVector(0, CubeSize, CubeSize);
-        FVector p111 = Origin + FVector(CubeSize, CubeSize, CubeSize);
+        bool bExposedTop = Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air;
+        bool bExposedBottom = Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air;
+        bool bExposedEast = Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air;
+        bool bExposedWest = Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air;
+        bool bExposedNorth = Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air;
+        bool bExposedSouth = Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air;
+
+        if (!bExposedTop && !bExposedBottom && !bExposedEast && !bExposedWest && !bExposedNorth && !bExposedSouth) return;
+
+        FVector Origin((double)WorldX * CubeSize, (double)WorldY * CubeSize, (double)lz * CubeSize);
+        FVector p000 = Origin, p100 = Origin + FVector(CubeSize, 0, 0), p010 = Origin + FVector(0, CubeSize, 0), p110 = Origin + FVector(CubeSize, CubeSize, 0);
+        FVector p001 = Origin + FVector(0, 0, CubeSize), p101 = Origin + FVector(CubeSize, 0, CubeSize), p011 = Origin + FVector(0, CubeSize, CubeSize), p111 = Origin + FVector(CubeSize, CubeSize, CubeSize);
+
+        auto AddQuadWorldFast = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector3f& FixedNormal, int32 MatID, int32 UAxis, int32 VAxis)
+            {
+                FVector2D uvA((float)A[UAxis] / CubeSize * TextureScale, (float)A[VAxis] / CubeSize * TextureScale);
+                FVector2D uvB((float)B[UAxis] / CubeSize * TextureScale, (float)B[VAxis] / CubeSize * TextureScale);
+                FVector2D uvC((float)C[UAxis] / CubeSize * TextureScale, (float)C[VAxis] / CubeSize * TextureScale);
+                FVector2D uvD((float)D[UAxis] / CubeSize * TextureScale, (float)D[VAxis] / CubeSize * TextureScale);
+
+                int32 vA = Mesh.AppendVertex(FVector3d(A)), vB = Mesh.AppendVertex(FVector3d(B));
+                int32 vC = Mesh.AppendVertex(FVector3d(C)), vD = Mesh.AppendVertex(FVector3d(D));
+
+                int32 nIdx = NormalOverlay->AppendElement(FixedNormal);
+
+                int32 t1 = Mesh.AppendTriangle(vA, vB, vC);
+                if (t1 != FDynamicMesh3::InvalidID)
+                {
+                    OutTriIDs.Add(t1);
+                    NormalOverlay->SetTriangle(t1, FIndex3i(nIdx, nIdx, nIdx));
+                    UVOverlay->SetTriangle(t1, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvB)), UVOverlay->AppendElement(FVector2f(uvC))));
+                    ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
+                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
+                }
+
+                int32 t2 = Mesh.AppendTriangle(vA, vC, vD);
+                if (t2 != FDynamicMesh3::InvalidID)
+                {
+                    OutTriIDs.Add(t2);
+                    NormalOverlay->SetTriangle(t2, FIndex3i(nIdx, nIdx, nIdx));
+                    UVOverlay->SetTriangle(t2, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvC)), UVOverlay->AppendElement(FVector2f(uvD))));
+                    ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
+                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
+                }
+            };
 
         if (bExposedTop) AddQuadWorldFast(p001, p011, p111, p101, FVector3f(0.f, 0.f, 1.f), TopMatID, 0, 1);
         if (bExposedBottom) AddQuadWorldFast(p100, p110, p010, p000, FVector3f(0.f, 0.f, -1.f), BottomMatID, 0, 1);
@@ -1010,14 +817,14 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
     }
     else
     {
-        FVector v000 = GetSmoothVertexWorld(WorldX, WorldY, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v100 = GetSmoothVertexWorld(WorldX + 1, WorldY, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v010 = GetSmoothVertexWorld(WorldX, WorldY + 1, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v110 = GetSmoothVertexWorld(WorldX + 1, WorldY + 1, WorldZ, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v001 = GetSmoothVertexWorld(WorldX, WorldY, WorldZ + 1, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v101 = GetSmoothVertexWorld(WorldX + 1, WorldY, WorldZ + 1, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v011 = GetSmoothVertexWorld(WorldX, WorldY + 1, WorldZ + 1, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
-        FVector v111 = GetSmoothVertexWorld(WorldX + 1, WorldY + 1, WorldZ + 1, WorldX, WorldY, WorldZ, HeightCache, Neighborhood);
+        FVector v000 = GetSmoothVertexLocal(lx, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v100 = GetSmoothVertexLocal(lx + 1, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v010 = GetSmoothVertexLocal(lx, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v110 = GetSmoothVertexLocal(lx + 1, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v001 = GetSmoothVertexLocal(lx, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v101 = GetSmoothVertexLocal(lx + 1, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v011 = GetSmoothVertexLocal(lx, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        FVector v111 = GetSmoothVertexLocal(lx + 1, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
 
         auto ComputeTriangleNormal = [](const FVector& A, const FVector& B, const FVector& C) -> FVector { return FVector::CrossProduct(C - A, B - A).GetSafeNormal(); };
         auto AddQuadWorldSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, int32 MatID, int32 UAxis, int32 VAxis)
@@ -1036,8 +843,7 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
                     OutTriIDs.Add(t1);
                     int32 nA1 = NormalOverlay->AppendElement(FVector3f(n1)), nB1 = NormalOverlay->AppendElement(FVector3f(n1)), nC1 = NormalOverlay->AppendElement(FVector3f(n1));
                     NormalOverlay->SetTriangle(t1, FIndex3i(nA1, nB1, nC1));
-                    int32 uvA1 = UVOverlay->AppendElement(FVector2f(uvA)), uvB1 = UVOverlay->AppendElement(FVector2f(uvB)), uvC1 = UVOverlay->AppendElement(FVector2f(uvC));
-                    UVOverlay->SetTriangle(t1, FIndex3i(uvA1, uvB1, uvC1));
+                    UVOverlay->SetTriangle(t1, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvB)), UVOverlay->AppendElement(FVector2f(uvC))));
                     ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
                     if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
                 }
@@ -1047,19 +853,18 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
                     OutTriIDs.Add(t2);
                     int32 nA2 = NormalOverlay->AppendElement(FVector3f(n2)), nC2 = NormalOverlay->AppendElement(FVector3f(n2)), nD2 = NormalOverlay->AppendElement(FVector3f(n2));
                     NormalOverlay->SetTriangle(t2, FIndex3i(nA2, nC2, nD2));
-                    int32 uvA2 = UVOverlay->AppendElement(FVector2f(uvA)), uvC2 = UVOverlay->AppendElement(FVector2f(uvC)), uvD2 = UVOverlay->AppendElement(FVector2f(uvD));
-                    UVOverlay->SetTriangle(t2, FIndex3i(uvA2, uvC2, uvD2));
+                    UVOverlay->SetTriangle(t2, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvC)), UVOverlay->AppendElement(FVector2f(uvD))));
                     ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
                     if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
                 }
             };
 
-        if (bExposedTop)
+        if (Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air)
         {
-            FVector n00 = GetSmoothNormalWorld(WorldX, WorldY, HeightCache);
-            FVector n10 = GetSmoothNormalWorld(WorldX + 1, WorldY, HeightCache);
-            FVector n01 = GetSmoothNormalWorld(WorldX, WorldY + 1, HeightCache);
-            FVector n11 = GetSmoothNormalWorld(WorldX + 1, WorldY + 1, HeightCache);
+            FVector n00 = GetSmoothNormalLocal(lx, ly, HeightGrid);
+            FVector n10 = GetSmoothNormalLocal(lx + 1, ly, HeightGrid);
+            FVector n01 = GetSmoothNormalLocal(lx, ly + 1, HeightGrid);
+            FVector n11 = GetSmoothNormalLocal(lx + 1, ly + 1, HeightGrid);
 
             auto AddTopQuadSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector& nA, const FVector& nB, const FVector& nC, const FVector& nD, int32 MatID)
                 {
@@ -1074,20 +879,16 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
                     int32 t1 = Mesh.AppendTriangle(vA, vB, vC);
                     if (t1 != FDynamicMesh3::InvalidID) {
                         OutTriIDs.Add(t1);
-                        int32 nA1 = NormalOverlay->AppendElement(FVector3f(nA)), nB1 = NormalOverlay->AppendElement(FVector3f(nB)), nC1 = NormalOverlay->AppendElement(FVector3f(nC));
-                        NormalOverlay->SetTriangle(t1, FIndex3i(nA1, nB1, nC1));
-                        int32 uvA1 = UVOverlay->AppendElement(FVector2f(uvA)), uvB1 = UVOverlay->AppendElement(FVector2f(uvB)), uvC1 = UVOverlay->AppendElement(FVector2f(uvC));
-                        UVOverlay->SetTriangle(t1, FIndex3i(uvA1, uvB1, uvC1));
+                        NormalOverlay->SetTriangle(t1, FIndex3i(NormalOverlay->AppendElement(FVector3f(nA)), NormalOverlay->AppendElement(FVector3f(nB)), NormalOverlay->AppendElement(FVector3f(nC))));
+                        UVOverlay->SetTriangle(t1, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvB)), UVOverlay->AppendElement(FVector2f(uvC))));
                         ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
                         if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
                     }
                     int32 t2 = Mesh.AppendTriangle(vA, vC, vD);
                     if (t2 != FDynamicMesh3::InvalidID) {
                         OutTriIDs.Add(t2);
-                        int32 nA2 = NormalOverlay->AppendElement(FVector3f(nA)), nC2 = NormalOverlay->AppendElement(FVector3f(nA)), nD2 = NormalOverlay->AppendElement(FVector3f(nD));
-                        NormalOverlay->SetTriangle(t2, FIndex3i(nA2, nC2, nD2));
-                        int32 uvA2 = UVOverlay->AppendElement(FVector2f(uvA)), uvC2 = UVOverlay->AppendElement(FVector2f(uvC)), uvD2 = UVOverlay->AppendElement(FVector2f(uvD));
-                        UVOverlay->SetTriangle(t2, FIndex3i(uvA2, uvC2, uvD2));
+                        NormalOverlay->SetTriangle(t2, FIndex3i(NormalOverlay->AppendElement(FVector3f(nA)), NormalOverlay->AppendElement(FVector3f(nA)), NormalOverlay->AppendElement(FVector3f(nD))));
+                        UVOverlay->SetTriangle(t2, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvC)), UVOverlay->AppendElement(FVector2f(uvD))));
                         ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
                         if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
                     }
@@ -1095,47 +896,48 @@ void ASmoothVoxelTerrain::AppendVoxelFacesWorld(int32 WorldX, int32 WorldY, int3
             AddTopQuadSmooth(v001, v011, v111, v101, n00, n01, n11, n10, TopMatID);
         }
 
-        if (bExposedBottom) AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
+        if (Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air)
+            AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
 
-        if (bExposedEast || (bExposedTop && (
-            GetNeighborTopHeightWorld(WorldX + 1, WorldY, WorldZ, v100, Neighborhood, HeightCache) < v100.Z ||
-            GetNeighborTopHeightWorld(WorldX + 1, WorldY, WorldZ, v101, Neighborhood, HeightCache) < v101.Z ||
-            GetNeighborTopHeightWorld(WorldX + 1, WorldY, WorldZ, v111, Neighborhood, HeightCache) < v111.Z ||
-            GetNeighborTopHeightWorld(WorldX + 1, WorldY, WorldZ, v110, Neighborhood, HeightCache) < v110.Z)))
+        if (Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, HeightGrid) < v100.Z ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v101, Neighborhood, HeightGrid) < v101.Z ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v111, Neighborhood, HeightGrid) < v111.Z ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v110, Neighborhood, HeightGrid) < v110.Z)
         {
             AddQuadWorldSmooth(v100, v101, v111, v110, SideMatID, 1, 2);
         }
 
-        if (bExposedWest || (bExposedTop && (
-            GetNeighborTopHeightWorld(WorldX - 1, WorldY, WorldZ, v010, Neighborhood, HeightCache) < v010.Z ||
-            GetNeighborTopHeightWorld(WorldX - 1, WorldY, WorldZ, v011, Neighborhood, HeightCache) < v011.Z ||
-            GetNeighborTopHeightWorld(WorldX - 1, WorldY, WorldZ, v001, Neighborhood, HeightCache) < v001.Z ||
-            GetNeighborTopHeightWorld(WorldX - 1, WorldY, WorldZ, v000, Neighborhood, HeightCache) < v000.Z)))
+        if (Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, HeightGrid) < v010.Z ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v011, Neighborhood, HeightGrid) < v011.Z ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v001, Neighborhood, HeightGrid) < v001.Z ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v000, Neighborhood, HeightGrid) < v000.Z)
         {
             AddQuadWorldSmooth(v010, v011, v001, v000, SideMatID, 1, 2);
         }
 
-        if (bExposedNorth || (bExposedTop && (
-            GetNeighborTopHeightWorld(WorldX, WorldY + 1, WorldZ, v110, Neighborhood, HeightCache) < v110.Z ||
-            GetNeighborTopHeightWorld(WorldX, WorldY + 1, WorldZ, v111, Neighborhood, HeightCache) < v111.Z ||
-            GetNeighborTopHeightWorld(WorldX, WorldY + 1, WorldZ, v011, Neighborhood, HeightCache) < v011.Z ||
-            GetNeighborTopHeightWorld(WorldX, WorldY + 1, WorldZ, v010, Neighborhood, HeightCache) < v010.Z)))
+        if (Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, HeightGrid) < v110.Z ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v111, Neighborhood, HeightGrid) < v111.Z ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v011, Neighborhood, HeightGrid) < v011.Z ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v010, Neighborhood, HeightGrid) < v010.Z)
         {
             AddQuadWorldSmooth(v110, v111, v011, v010, SideMatID, 0, 2);
         }
 
-        if (bExposedSouth || (bExposedTop && (
-            GetNeighborTopHeightWorld(WorldX, WorldY - 1, WorldZ, v000, Neighborhood, HeightCache) < v000.Z ||
-            GetNeighborTopHeightWorld(WorldX, WorldY - 1, WorldZ, v001, Neighborhood, HeightCache) < v001.Z ||
-            GetNeighborTopHeightWorld(WorldX, WorldY - 1, WorldZ, v101, Neighborhood, HeightCache) < v101.Z ||
-            GetNeighborTopHeightWorld(WorldX, WorldY - 1, WorldZ, v100, Neighborhood, HeightCache) < v100.Z)))
+        if (Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, HeightGrid) < v000.Z ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v001, Neighborhood, HeightGrid) < v001.Z ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v101, Neighborhood, HeightGrid) < v101.Z ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v100, Neighborhood, HeightGrid) < v100.Z)
         {
             AddQuadWorldSmooth(v000, v001, v101, v100, SideMatID, 0, 2);
         }
     }
 }
 
-void ASmoothVoxelTerrain::AppendGrassBladesWorld(int32 WorldX, int32 WorldY, int32 WorldZ, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FHeightCache& HeightCache, const FChunkNeighborhood& Neighborhood)
+void ASmoothVoxelTerrain::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord)
 {
     FDynamicMeshAttributeSet* Attr = Mesh.Attributes();
     if (!Attr) return;
@@ -1146,8 +948,12 @@ void ASmoothVoxelTerrain::AppendGrassBladesWorld(int32 WorldX, int32 WorldY, int
     if (Attr->NumUVLayers() < 2) Attr->SetNumUVLayers(2);
     FDynamicMeshUVOverlay* UVOverlay1 = Attr->GetUVLayer(1);
 
+    int32 WorldX = ChunkCoord.X * ChunkSize + lx;
+    int32 WorldY = ChunkCoord.Y * ChunkSize + ly;
+
     float DensityNoise = FastValueNoise2D((float)WorldX * GrassDensityNoiseScale, (float)WorldY * GrassDensityNoiseScale);
     float FineNoise = Hash3D(WorldX, WorldY, 999);
+
     if (FineNoise < 0.20f) DensityNoise *= 0.1f;
     else if (FineNoise > 0.85f) DensityNoise = FMath::Min(1.0f, DensityNoise * 1.5f);
 
@@ -1164,19 +970,19 @@ void ASmoothVoxelTerrain::AppendGrassBladesWorld(int32 WorldX, int32 WorldY, int
         float RandAngle = FastRand.NextFloat(), RandLeanAngle = FastRand.NextFloat(), RandLeanStrength = FastRand.NextFloat();
         float RandBendAngle = FastRand.NextFloat(), RandBendForce = FastRand.NextFloat();
 
-        float BladeWorldX = (float)WorldX + RandX;
-        float BladeWorldY = (float)WorldY + RandY;
+        float BladeLocalX = (float)lx + RandX;
+        float BladeLocalY = (float)ly + RandY;
         float BladeWorldZ = 0.0f;
         FVector GroundNormal(0.f, 0.f, 1.f);
 
         if (bLocalSmoothTerrain)
         {
-            BladeWorldZ = GetInterpolatedHeightCached(BladeWorldX, BladeWorldY, HeightCache) * LocalCubeSize;
-            GroundNormal = GetSmoothNormalWorld(FMath::RoundToInt(BladeWorldX), FMath::RoundToInt(BladeWorldY), HeightCache);
+            BladeWorldZ = GetInterpolatedHeightLocal(BladeLocalX, BladeLocalY, HeightGrid) * LocalCubeSize;
+            GroundNormal = GetSmoothNormalLocal(FMath::RoundToInt(BladeLocalX), FMath::RoundToInt(BladeLocalY), HeightGrid);
         }
-        else BladeWorldZ = (float)(WorldZ + 1) * LocalCubeSize;
+        else BladeWorldZ = (float)(lz + 1) * LocalCubeSize;
 
-        FVector BasePos((double)BladeWorldX * LocalCubeSize, (double)BladeWorldY * LocalCubeSize, (double)BladeWorldZ);
+        FVector BasePos((double)(WorldX + RandX) * LocalCubeSize, (double)(WorldY + RandY) * LocalCubeSize, (double)BladeWorldZ);
 
         float Height = LocalGrassMinHeight + (LocalGrassMaxHeight - LocalGrassMinHeight) * RandHeight;
         float Width = LocalGrassMinWidth + (LocalGrassMaxWidth - LocalGrassMinWidth) * RandWidth;
@@ -1285,9 +1091,7 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
 
                                 int32 nx = LocalX + dx, ny = LocalY + dy, nz = LocalZ + dz;
                                 if (nx >= 0 && nx < TerrainOwner->ChunkSize && ny >= 0 && ny < TerrainOwner->ChunkSize && nz >= 0 && nz < TerrainOwner->MaxHeight)
-                                {
                                     RemoveVoxelFaces(nx, ny, nz, MeshOut, GrassMeshOut, TerrainOwner);
-                                }
                             }
                         }
                     }
@@ -1308,15 +1112,15 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
                                 if (nx >= 0 && nx < TerrainOwner->ChunkSize && ny >= 0 && ny < TerrainOwner->ChunkSize && nz >= 0 && nz < TerrainOwner->MaxHeight)
                                 {
                                     if (VoxelData[nx + ny * TerrainOwner->ChunkSize + nz * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize] != EVoxelType::Air)
-                                    {
                                         AddVoxelFaces(nx, ny, nz, MeshOut, GrassMeshOut, TerrainOwner);
-                                    }
                                 }
                             }
                         }
                     }
                 });
         });
+
+    MeshComponent->UpdateCollision(true);
 }
 
 void ASmoothVoxelTerrain::FVoxelChunk::RemoveVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, FDynamicMesh3& Mesh, FDynamicMesh3& GrassMesh, ASmoothVoxelTerrain* TerrainOwner)
@@ -1336,9 +1140,6 @@ void ASmoothVoxelTerrain::FVoxelChunk::RemoveVoxelFaces(int32 LocalX, int32 Loca
 
 void ASmoothVoxelTerrain::FVoxelChunk::AddVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, FDynamicMesh3& Mesh, FDynamicMesh3& GrassMesh, ASmoothVoxelTerrain* TerrainOwner)
 {
-    int32 WorldX = Coord.X * TerrainOwner->ChunkSize + LocalX;
-    int32 WorldY = Coord.Y * TerrainOwner->ChunkSize + LocalY;
-    int32 WorldZ = LocalZ;
     int32 VoxelIndex = LocalX + LocalY * TerrainOwner->ChunkSize + LocalZ * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize;
 
     FChunkNeighborhood Neighborhood;
@@ -1358,18 +1159,19 @@ void ASmoothVoxelTerrain::FVoxelChunk::AddVoxelFaces(int32 LocalX, int32 LocalY,
     Neighborhood.SouthData = RetrieveVoxelDataPtr(FIntVector(0, -1, 0));
     Neighborhood.NorthData = RetrieveVoxelDataPtr(FIntVector(0, 1, 0));
 
-    FHeightCache HeightCache;
-    HeightCache.InitForVoxel(WorldX, WorldY, TerrainOwner);
+    FLocalHeightGrid HeightGrid;
+    HeightGrid.Heights = HeightMap.GetData();
+    HeightGrid.CacheSize = TerrainOwner->ChunkSize + 3;
 
     FTriIDArray NewTriIDs;
-    TerrainOwner->AppendVoxelFacesWorld(WorldX, WorldY, WorldZ, Mesh, NewTriIDs, HeightCache, Neighborhood);
+    TerrainOwner->AppendVoxelFacesLocal(LocalX, LocalY, LocalZ, Mesh, NewTriIDs, HeightGrid, Neighborhood, Coord);
     if (NewTriIDs.Num() > 0) VoxelTriangles.Add(VoxelIndex, NewTriIDs);
 
     FTriIDArray NewGrassTriIDs;
     if (TerrainOwner->bEnableGrassGeometry && VoxelData[VoxelIndex] == EVoxelType::Grass)
     {
         if (Neighborhood.GetVoxel(LocalX, LocalY, LocalZ + 1) == EVoxelType::Air)
-            TerrainOwner->AppendGrassBladesWorld(WorldX, WorldY, WorldZ, GrassMesh, NewGrassTriIDs, HeightCache, Neighborhood);
+            TerrainOwner->AppendGrassBladesLocal(LocalX, LocalY, LocalZ, GrassMesh, NewGrassTriIDs, HeightGrid, Neighborhood, Coord);
     }
     if (NewGrassTriIDs.Num() > 0) GrassVoxelTriangles.Add(VoxelIndex, NewGrassTriIDs);
 }
