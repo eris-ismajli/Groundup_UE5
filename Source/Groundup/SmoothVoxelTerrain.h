@@ -137,6 +137,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     bool bEnableGrassGeometry = true;
 
+    /** Distance in chunks at which grass blades will be generated */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
+    int32 GrassRenderDistance = 3;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     int32 GrassMinDensity = 2;
 
@@ -156,9 +160,6 @@ public:
     float GrassMaxWidth = 12.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
-    float GrassColorNoiseScale = 0.02f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     float GrassDensityNoiseScale = 0.03f;
 
     // --- Optimized Grass Controls ---
@@ -167,18 +168,6 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     bool bTwoSidedGrass = true;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
-    FLinearColor GrassBaseColorDark = FLinearColor(0.015f, 0.10f, 0.03f, 1.0f);
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
-    FLinearColor GrassTipColorDark = FLinearColor(0.06f, 0.30f, 0.06f, 1.0f);
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
-    FLinearColor GrassBaseColorLight = FLinearColor(0.04f, 0.18f, 0.04f, 1.0f);
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
-    FLinearColor GrassTipColorLight = FLinearColor(0.20f, 0.48f, 0.08f, 1.0f);
 
     UFUNCTION(BlueprintCallable, Category = "Terrain")
     void RebuildTerrain();
