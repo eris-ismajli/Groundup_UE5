@@ -704,15 +704,25 @@ FVector ASmoothVoxelTerrain::GetSmoothNormalLocal(int32 VertX, int32 VertY, cons
     return FVector(hL - hR, hD - hU, 2.0f).GetSafeNormal();
 }
 
+// Replace the GetNeighborTopHeightLocal function implementation with this version:
+
 float ASmoothVoxelTerrain::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalHeightGrid& HeightGrid) const
 {
     EVoxelType neighborType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ);
     if (neighborType == EVoxelType::Air) return -FLT_MAX;
     else if (neighborType == EVoxelType::Grass)
     {
-        float LocalVertX = (float)VertexLocalPos.X / CubeSize - Neighborhood.Self->Coord.X * ChunkSize;
-        float LocalVertY = (float)VertexLocalPos.Y / CubeSize - Neighborhood.Self->Coord.Y * ChunkSize;
-        return GetInterpolatedHeightLocal(LocalVertX, LocalVertY, HeightGrid) * CubeSize;
+        // If the neighbor has a block above it, it gets squashed into a full cube block.
+        if (Neighborhood.GetVoxel(LocalX, LocalY, LocalZ + 1) != EVoxelType::Air)
+        {
+            return (LocalZ + 1) * CubeSize;
+        }
+
+        // Snap coordinates to perfectly match exact integers instead of doing a float lerp, skipping float drift.
+        int32 VertX = FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.Self->Coord.X * ChunkSize;
+        int32 VertY = FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.Self->Coord.Y * ChunkSize;
+
+        return HeightGrid.GetHeight(VertX, VertY) * CubeSize;
     }
     return (LocalZ + 1) * CubeSize;
 }
@@ -899,38 +909,41 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
         if (Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air)
             AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
 
+
+        const float ZOffsetEpsilon = 0.1f; 
+
         if (Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, HeightGrid) < v100.Z ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v101, Neighborhood, HeightGrid) < v101.Z ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v111, Neighborhood, HeightGrid) < v111.Z ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v110, Neighborhood, HeightGrid) < v110.Z)
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v101, Neighborhood, HeightGrid) < v101.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v111, Neighborhood, HeightGrid) < v111.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx + 1, ly, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon)
         {
             AddQuadWorldSmooth(v100, v101, v111, v110, SideMatID, 1, 2);
         }
 
         if (Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, HeightGrid) < v010.Z ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v011, Neighborhood, HeightGrid) < v011.Z ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v001, Neighborhood, HeightGrid) < v001.Z ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v000, Neighborhood, HeightGrid) < v000.Z)
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v011, Neighborhood, HeightGrid) < v011.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v001, Neighborhood, HeightGrid) < v001.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx - 1, ly, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon)
         {
             AddQuadWorldSmooth(v010, v011, v001, v000, SideMatID, 1, 2);
         }
 
         if (Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, HeightGrid) < v110.Z ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v111, Neighborhood, HeightGrid) < v111.Z ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v011, Neighborhood, HeightGrid) < v011.Z ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v010, Neighborhood, HeightGrid) < v010.Z)
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v111, Neighborhood, HeightGrid) < v111.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v011, Neighborhood, HeightGrid) < v011.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx, ly + 1, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon)
         {
             AddQuadWorldSmooth(v110, v111, v011, v010, SideMatID, 0, 2);
         }
 
         if (Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, HeightGrid) < v000.Z ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v001, Neighborhood, HeightGrid) < v001.Z ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v101, Neighborhood, HeightGrid) < v101.Z ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v100, Neighborhood, HeightGrid) < v100.Z)
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v001, Neighborhood, HeightGrid) < v001.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v101, Neighborhood, HeightGrid) < v101.Z - ZOffsetEpsilon ||
+            GetNeighborTopHeightLocal(lx, ly - 1, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon)
         {
             AddQuadWorldSmooth(v000, v001, v101, v100, SideMatID, 0, 2);
         }
