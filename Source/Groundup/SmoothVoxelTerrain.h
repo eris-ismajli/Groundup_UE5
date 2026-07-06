@@ -170,7 +170,7 @@ public:
     EVoxelType GetVoxelAtWorld(int32 WorldX, int32 WorldY, int32 WorldZ) const;
 
     UFUNCTION(BlueprintCallable, Category = "Terrain")
-    void PlaceVoxel(FVector WorldLocation, EVoxelType Type = EVoxelType::Dirt);
+    void PlaceVoxel(FVector WorldLocation, EVoxelType Type = EVoxelType::Stone);
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Collision")
     TEnumAsByte<ECollisionEnabled::Type> CollisionEnabled = ECollisionEnabled::QueryAndPhysics;

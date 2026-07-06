@@ -530,9 +530,6 @@ void ASmoothVoxelTerrain::FVoxelChunk::BuildMesh(ASmoothVoxelTerrain* TerrainOwn
 
 void ASmoothVoxelTerrain::FVoxelChunk::UpdateSharedFace(int32 LocalX, int32 LocalY, int32 LocalZ, ASmoothVoxelTerrain* TerrainOwner, const FIntVector& NeighborDirection)
 {
-    int32 Index = LocalX + LocalY * TerrainOwner->ChunkSize + LocalZ * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize;
-    if (VoxelData[Index] == EVoxelType::Air) return;
-
     UDynamicMesh* DynamicMesh = MeshComponent->GetDynamicMesh();
     UDynamicMesh* GrassDynamicMesh = GrassMeshComponent->GetDynamicMesh();
     if (!DynamicMesh || !GrassDynamicMesh) return;
@@ -541,8 +538,50 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateSharedFace(int32 LocalX, int32 Loca
         {
             GrassDynamicMesh->EditMesh([&](FDynamicMesh3& GrassMeshOut)
                 {
-                    RemoveVoxelFaces(LocalX, LocalY, LocalZ, MeshOut, GrassMeshOut, TerrainOwner);
-                    AddVoxelFaces(LocalX, LocalY, LocalZ, MeshOut, GrassMeshOut, TerrainOwner);
+                    // Remove 3x3 block window along the boundary plane
+                    for (int32 dz = -1; dz <= 1; ++dz)
+                    {
+                        for (int32 dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int32 dx = -1; dx <= 1; ++dx)
+                            {
+                                // Only iterate on the 2D plane defined by the neighbor direction
+                                if (NeighborDirection.X != 0 && dx != 0) continue;
+                                if (NeighborDirection.Y != 0 && dy != 0) continue;
+                                if (NeighborDirection.Z != 0 && dz != 0) continue;
+
+                                int32 nx = LocalX + dx, ny = LocalY + dy, nz = LocalZ + dz;
+                                if (nx >= 0 && nx < TerrainOwner->ChunkSize && ny >= 0 && ny < TerrainOwner->ChunkSize && nz >= 0 && nz < TerrainOwner->MaxHeight)
+                                {
+                                    RemoveVoxelFaces(nx, ny, nz, MeshOut, GrassMeshOut, TerrainOwner);
+                                }
+                            }
+                        }
+                    }
+
+                    // Add 3x3 block window along the boundary plane
+                    for (int32 dz = -1; dz <= 1; ++dz)
+                    {
+                        for (int32 dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int32 dx = -1; dx <= 1; ++dx)
+                            {
+                                if (NeighborDirection.X != 0 && dx != 0) continue;
+                                if (NeighborDirection.Y != 0 && dy != 0) continue;
+                                if (NeighborDirection.Z != 0 && dz != 0) continue;
+
+                                int32 nx = LocalX + dx, ny = LocalY + dy, nz = LocalZ + dz;
+                                if (nx >= 0 && nx < TerrainOwner->ChunkSize && ny >= 0 && ny < TerrainOwner->ChunkSize && nz >= 0 && nz < TerrainOwner->MaxHeight)
+                                {
+                                    int32 Index = nx + ny * TerrainOwner->ChunkSize + nz * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize;
+                                    if (VoxelData[Index] != EVoxelType::Air)
+                                    {
+                                        AddVoxelFaces(nx, ny, nz, MeshOut, GrassMeshOut, TerrainOwner);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 });
         });
 
@@ -704,27 +743,50 @@ FVector ASmoothVoxelTerrain::GetSmoothNormalLocal(int32 VertX, int32 VertY, cons
     return FVector(hL - hR, hD - hU, 2.0f).GetSafeNormal();
 }
 
-// Replace the GetNeighborTopHeightLocal function implementation with this version:
-
 float ASmoothVoxelTerrain::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalHeightGrid& HeightGrid) const
 {
     EVoxelType neighborType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ);
-    if (neighborType == EVoxelType::Air) return -FLT_MAX;
-    else if (neighborType == EVoxelType::Grass)
+
+    if (neighborType != EVoxelType::Air)
     {
-        // If the neighbor has a block above it, it gets squashed into a full cube block.
+        // If there's another solid block above it, it forms a continuous wall going higher.
         if (Neighborhood.GetVoxel(LocalX, LocalY, LocalZ + 1) != EVoxelType::Air)
         {
-            return (LocalZ + 1) * CubeSize;
+            return FLT_MAX;
         }
 
-        // Snap coordinates to perfectly match exact integers instead of doing a float lerp, skipping float drift.
-        int32 VertX = FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.Self->Coord.X * ChunkSize;
-        int32 VertY = FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.Self->Coord.Y * ChunkSize;
+        // If it's Grass with nothing above, its top is deformed to the HeightGrid.
+        if (neighborType == EVoxelType::Grass)
+        {
+            int32 VertX = FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.Self->Coord.X * ChunkSize;
+            int32 VertY = FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.Self->Coord.Y * ChunkSize;
+            return HeightGrid.GetHeight(VertX, VertY) * CubeSize;
+        }
 
-        return HeightGrid.GetHeight(VertX, VertY) * CubeSize;
+        // Standard un-deformed blocks (Dirt/Stone) stop perfectly at their upper bounds
+        return (LocalZ + 1) * CubeSize;
     }
-    return (LocalZ + 1) * CubeSize;
+    else
+    {
+        // The adjacent block is AIR! 
+        // We must check if the block BELOW it is a Grass block stretching UP into this empty space.
+        EVoxelType belowType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ - 1);
+
+        if (belowType == EVoxelType::Grass)
+        {
+            int32 VertX = FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.Self->Coord.X * ChunkSize;
+            int32 VertY = FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.Self->Coord.Y * ChunkSize;
+            return HeightGrid.GetHeight(VertX, VertY) * CubeSize;
+        }
+        else if (belowType != EVoxelType::Air)
+        {
+            // If it's Dirt/Stone below, it stops exactly at LocalZ's bottom boundary.
+            return LocalZ * CubeSize;
+        }
+
+        // It's completely empty air all the way down
+        return -FLT_MAX;
+    }
 }
 
 FLinearColor ASmoothVoxelTerrain::GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const
@@ -910,10 +972,9 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
             AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
 
 
-        const float ZOffsetEpsilon = 0.1f; 
+        const float ZOffsetEpsilon = 0.1f;
 
-        if (Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon ||
+        if (GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx + 1, ly, lz, v101, Neighborhood, HeightGrid) < v101.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx + 1, ly, lz, v111, Neighborhood, HeightGrid) < v111.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx + 1, ly, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon)
@@ -921,8 +982,7 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
             AddQuadWorldSmooth(v100, v101, v111, v110, SideMatID, 1, 2);
         }
 
-        if (Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon ||
+        if (GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx - 1, ly, lz, v011, Neighborhood, HeightGrid) < v011.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx - 1, ly, lz, v001, Neighborhood, HeightGrid) < v001.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx - 1, ly, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon)
@@ -930,8 +990,7 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
             AddQuadWorldSmooth(v010, v011, v001, v000, SideMatID, 1, 2);
         }
 
-        if (Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon ||
+        if (GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx, ly + 1, lz, v111, Neighborhood, HeightGrid) < v111.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx, ly + 1, lz, v011, Neighborhood, HeightGrid) < v011.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx, ly + 1, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon)
@@ -939,8 +998,7 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
             AddQuadWorldSmooth(v110, v111, v011, v010, SideMatID, 0, 2);
         }
 
-        if (Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon ||
+        if (GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx, ly - 1, lz, v001, Neighborhood, HeightGrid) < v001.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx, ly - 1, lz, v101, Neighborhood, HeightGrid) < v101.Z - ZOffsetEpsilon ||
             GetNeighborTopHeightLocal(lx, ly - 1, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon)
@@ -1093,15 +1151,13 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
                     if (!Attr->PrimaryColors()) Attr->EnablePrimaryColors();
                     if (!Attr->HasMaterialID()) Attr->EnableMaterialID();
 
+                    // 1. Remove faces in full 3x3x3 grid
                     for (int32 dz = -1; dz <= 1; ++dz)
                     {
                         for (int32 dy = -1; dy <= 1; ++dy)
                         {
                             for (int32 dx = -1; dx <= 1; ++dx)
                             {
-                                int32 dist = FMath::Abs(dx) + FMath::Abs(dy) + FMath::Abs(dz);
-                                if (dist != 0 && dist != 1) continue;
-
                                 int32 nx = LocalX + dx, ny = LocalY + dy, nz = LocalZ + dz;
                                 if (nx >= 0 && nx < TerrainOwner->ChunkSize && ny >= 0 && ny < TerrainOwner->ChunkSize && nz >= 0 && nz < TerrainOwner->MaxHeight)
                                     RemoveVoxelFaces(nx, ny, nz, MeshOut, GrassMeshOut, TerrainOwner);
@@ -1112,15 +1168,13 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
                     int32 Index = LocalX + LocalY * TerrainOwner->ChunkSize + LocalZ * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize;
                     VoxelData[Index] = NewType;
 
+                    // 2. Add faces in full 3x3x3 grid
                     for (int32 dz = -1; dz <= 1; ++dz)
                     {
                         for (int32 dy = -1; dy <= 1; ++dy)
                         {
                             for (int32 dx = -1; dx <= 1; ++dx)
                             {
-                                int32 dist = FMath::Abs(dx) + FMath::Abs(dy) + FMath::Abs(dz);
-                                if (dist != 0 && dist != 1) continue;
-
                                 int32 nx = LocalX + dx, ny = LocalY + dy, nz = LocalZ + dz;
                                 if (nx >= 0 && nx < TerrainOwner->ChunkSize && ny >= 0 && ny < TerrainOwner->ChunkSize && nz >= 0 && nz < TerrainOwner->MaxHeight)
                                 {
