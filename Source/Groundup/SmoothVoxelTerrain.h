@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Components/SceneComponent.h"
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
@@ -46,12 +47,15 @@ class GROUNDUP_API ASmoothVoxelTerrain : public AActor
     GENERATED_BODY()
 
 public:
-    using FTriIDArray = TArray<int32, TInlineAllocator<12>>;
+    using FTriIDArray = TArray<int32, TInlineAllocator<64>>;
 
     struct FVoxelChunk
     {
         FIntVector Coord;
         EChunkState State = EChunkState::Unloaded;
+
+        bool bGeneratingGrass = false;
+        bool bGrassGenerated = false;
 
         TSharedPtr<TArray<EVoxelType>> VoxelData;
         TSharedPtr<TArray<float>> HeightMap;
@@ -64,8 +68,8 @@ public:
 
         void UpdateVoxel(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
         void UpdateVoxelMesh(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
-        void RemoveVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3& GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
-        void AddVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3& GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
+        void RemoveVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3* GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
+        void AddVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3* GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
         void UpdateSharedFace(int32 LocalX, int32 LocalY, int32 LocalZ, ASmoothVoxelTerrain* TerrainOwner, const FIntVector& NeighborDirection);
     };
 
@@ -77,8 +81,12 @@ protected:
     virtual void OnConstruction(const FTransform& Transform) override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Tick(float DeltaTime) override;
+    void OnPlayerMoved(USceneComponent* UpdatedComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
 
 public:
+    UFUNCTION(BlueprintCallable, Category = "Procedural Generation|Events")
+    void RegisterPlayer(APawn* PlayerPawn);
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
     int32 RenderDistance = 12;
 
@@ -86,29 +94,29 @@ public:
     int32 UnloadDistance = 14;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
-    float UpdateInterval = 0.5f;
-
-    // Concurrency Budgeting constraints
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
     int32 MaxChunkDataGenPerFrame = 5;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
     int32 MaxChunkMeshGenPerFrame = 2;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
+    int32 MaxChunkGrassGenPerFrame = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
     int32 MaxMeshApplyPerFrame = 1;
 
     FIntVector LastPlayerChunkCoord = FIntVector(999999, 999999, 999999);
-    float TimeSinceLastUpdate = 0.0f;
 
-    void UpdateProceduralTerrain();
+    void HandleBoundaryCrossing(const FIntVector& NewChunkCoord);
     void ProcessTasks();
     void GenerateChunkData(const FIntVector& ChunkCoord);
     void GenerateChunkMesh(const FIntVector& ChunkCoord);
+    void GenerateGrassMesh(const FIntVector& ChunkCoord);
     void UnloadChunk(const FIntVector& Coord);
     bool CheckNeighborsDataReady(const FIntVector& ChunkCoord);
 
-    // -- Component properties from original code --
+    void UpdateGrassVisibility();
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     UMaterialInterface* GrassMaterial = nullptr;
 
@@ -246,21 +254,29 @@ private:
     void UpdateCollisionIfNeeded();
     bool bIsDestroyed = false;
 
+    TWeakObjectPtr<USceneComponent> TrackedPlayerComponent;
+
 private:
-    // Core optimized architecture Queues & Pools
     TArray<FIntVector> DataGenerationQueue;
     TArray<FIntVector> MeshGenerationQueue;
+    TArray<FIntVector> GrassGenerationQueue;
 
     struct FMeshApplyTask
     {
         FIntVector Coord;
         UE::Geometry::FDynamicMesh3 LocalMesh;
-        UE::Geometry::FDynamicMesh3 LocalGrassMesh;
         TMap<int32, FTriIDArray> VoxelTriangles;
+    };
+
+    struct FGrassApplyTask
+    {
+        FIntVector Coord;
+        UE::Geometry::FDynamicMesh3 LocalGrassMesh;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
     };
 
     TArray<TSharedPtr<FMeshApplyTask>> MeshApplyQueue;
+    TArray<TSharedPtr<FGrassApplyTask>> GrassApplyQueue;
 
     TArray<UDynamicMeshComponent*> MeshComponentPool;
     TArray<UDynamicMeshComponent*> GrassMeshComponentPool;
