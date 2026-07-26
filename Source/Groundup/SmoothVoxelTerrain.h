@@ -12,7 +12,6 @@ namespace UE::Geometry { class FDynamicMesh3; }
 
 struct FChunkNeighborhood;
 
-// Lightweight wrapper for pre-calculated height access
 struct FLocalHeightGrid
 {
     const float* Heights;
@@ -32,6 +31,15 @@ enum class EVoxelType : uint8
     Stone UMETA(DisplayName = "Stone")
 };
 
+enum class EChunkState : uint8
+{
+    Unloaded,
+    GeneratingData,
+    DataReady,
+    GeneratingMesh,
+    MeshReady
+};
+
 UCLASS()
 class GROUNDUP_API ASmoothVoxelTerrain : public AActor
 {
@@ -43,16 +51,18 @@ public:
     struct FVoxelChunk
     {
         FIntVector Coord;
-        TArray<EVoxelType> VoxelData;
-        TArray<float> HeightMap; // Cached noise evaluations
+        EChunkState State = EChunkState::Unloaded;
+
+        TSharedPtr<TArray<EVoxelType>> VoxelData;
+        TSharedPtr<TArray<float>> HeightMap;
+
         TMap<int32, FTriIDArray> VoxelTriangles;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
+
         UDynamicMeshComponent* MeshComponent = nullptr;
         UDynamicMeshComponent* GrassMeshComponent = nullptr;
 
-        void BuildMesh(ASmoothVoxelTerrain* TerrainOwner);
         void UpdateVoxel(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
-
         void UpdateVoxelMesh(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
         void RemoveVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3& GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
         void AddVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3& GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
@@ -70,26 +80,35 @@ protected:
 
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
-    int32 RenderDistance = 6;
+    int32 RenderDistance = 12;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
-    int32 UnloadDistance = 8;
+    int32 UnloadDistance = 14;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
-    float UpdateInterval = 0.3f;
+    float UpdateInterval = 0.5f;
+
+    // Concurrency Budgeting constraints
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
+    int32 MaxChunkDataGenPerFrame = 5;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
-    int32 MaxChunkGenPerFrame = 1;
+    int32 MaxChunkMeshGenPerFrame = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
+    int32 MaxMeshApplyPerFrame = 1;
 
     FIntVector LastPlayerChunkCoord = FIntVector(999999, 999999, 999999);
     float TimeSinceLastUpdate = 0.0f;
-    TArray<FIntVector> GenerationQueue;
 
     void UpdateProceduralTerrain();
-    void ProcessGenerationQueue();
-    void GenerateSingleChunk(const FIntVector& ChunkCoord);
+    void ProcessTasks();
+    void GenerateChunkData(const FIntVector& ChunkCoord);
+    void GenerateChunkMesh(const FIntVector& ChunkCoord);
     void UnloadChunk(const FIntVector& Coord);
+    bool CheckNeighborsDataReady(const FIntVector& ChunkCoord);
 
+    // -- Component properties from original code --
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     UMaterialInterface* GrassMaterial = nullptr;
 
@@ -166,7 +185,6 @@ public:
     void RemoveVoxel(FVector WorldLocation);
 
     bool GetVoxelAtWorldPoint(const FVector& WorldPoint, int32& OutVoxelX, int32& OutVoxelY, int32& OutVoxelZ, EVoxelType* OutType = nullptr);
-
     EVoxelType GetVoxelAtWorld(int32 WorldX, int32 WorldY, int32 WorldZ) const;
 
     UFUNCTION(BlueprintCallable, Category = "Terrain")
@@ -226,6 +244,27 @@ private:
 
     bool bCollisionDirty = false;
     void UpdateCollisionIfNeeded();
-
     bool bIsDestroyed = false;
+
+private:
+    // Core optimized architecture Queues & Pools
+    TArray<FIntVector> DataGenerationQueue;
+    TArray<FIntVector> MeshGenerationQueue;
+
+    struct FMeshApplyTask
+    {
+        FIntVector Coord;
+        UE::Geometry::FDynamicMesh3 LocalMesh;
+        UE::Geometry::FDynamicMesh3 LocalGrassMesh;
+        TMap<int32, FTriIDArray> VoxelTriangles;
+        TMap<int32, FTriIDArray> GrassVoxelTriangles;
+    };
+
+    TArray<TSharedPtr<FMeshApplyTask>> MeshApplyQueue;
+
+    TArray<UDynamicMeshComponent*> MeshComponentPool;
+    TArray<UDynamicMeshComponent*> GrassMeshComponentPool;
+
+    UDynamicMeshComponent* AcquireMeshComponent(bool bIsGrass);
+    void ReleaseMeshComponent(UDynamicMeshComponent* Comp, bool bIsGrass);
 };
