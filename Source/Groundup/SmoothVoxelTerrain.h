@@ -133,7 +133,7 @@ public:
     int32 ChunkSize = 32;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    int32 MaxHeight = 64;
+    int32 MaxHeight = 128; // Increased for higher relief jagged terrains
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     float CubeSize = 100.0f;
@@ -142,7 +142,7 @@ public:
     float NoiseScale = 0.01f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    float HeightMultiplier = 2000.0f;
+    float HeightMultiplier = 1.0f; // Reset to 1.0 as amplitudes now control local heights
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     float MinGrassThickness = 1.5f;
@@ -153,6 +153,32 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     bool bSmoothTerrain = false;
 
+    // --- GRASSLAND BIOME SETTINGS ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float BiomeFrequency = 0.003f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float BaseHeight = 2000.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float FlatAmplitude = 250.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float RollingAmplitude = 1200.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float FracturedAmplitude = 2200.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float TerraceHeight = 400.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float TerraceSharpness = 8.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
+    float JaggedAmplitude = 4500.0f;
+
+    // --- GRASS SETTINGS ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     bool bEnableGrassGeometry = true;
 

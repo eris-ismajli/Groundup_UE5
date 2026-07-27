@@ -38,6 +38,59 @@ FORCEINLINE float FastValueNoise2D(float x, float y)
     return FMath::Lerp(FMath::Lerp(a, b, ux), FMath::Lerp(c, d, ux), uy);
 }
 
+// Fractal Brownian Motion for layered natural generation
+FORCEINLINE float FBM2D(float x, float y, int32 octaves)
+{
+    float value = 0.0f;
+    float amplitude = 0.5f;
+    float frequency = 1.0f;
+    float maxVal = 0.0f;
+    
+    for(int32 i = 0; i < octaves; i++)
+    {
+        value += FastValueNoise2D(x * frequency, y * frequency) * amplitude;
+        maxVal += amplitude;
+        // Offset to prevent grid alignment artifacts
+        x += 13.37f;
+        y += 73.13f;
+        amplitude *= 0.5f;
+        frequency *= 2.0f;
+    }
+    return value / maxVal;
+}
+
+// Ridged FBM for aggressive peaks (Sharp / Jagged Grasslands)
+FORCEINLINE float RidgedFBM2D(float x, float y, int32 octaves)
+{
+    float value = 0.0f;
+    float amplitude = 0.5f;
+    float frequency = 1.0f;
+    float maxVal = 0.0f;
+
+    for(int32 i = 0; i < octaves; i++)
+    {
+        float n = FastValueNoise2D(x * frequency, y * frequency) * 2.0f - 1.0f;
+        n = 1.0f - FMath::Abs(n);
+        value += (n * n) * amplitude;
+        maxVal += amplitude;
+        x += 13.37f;
+        y += 73.13f;
+        amplitude *= 0.5f;
+        frequency *= 2.0f;
+    }
+    return value / maxVal;
+}
+
+// Applies stepping/terracing while keeping smoothly sloping ramps (Abrupt / Fractured)
+FORCEINLINE float TerraceSmooth(float h, float terraceHeight, float sharpness)
+{
+    float scaledH = h / terraceHeight;
+    float fl = FMath::FloorToFloat(scaledH);
+    float fr = scaledH - fl;
+    float smoothedFr = FMath::Clamp((fr - 0.5f) * sharpness + 0.5f, 0.0f, 1.0f);
+    return (fl + smoothedFr) * terraceHeight;
+}
+
 FORCEINLINE float Hash3D(int32 x, int32 y, int32 z)
 {
     uint32 h = (uint32)x * 73856093U ^ (uint32)y * 19349663U ^ (uint32)z * 83492791U;
@@ -77,7 +130,7 @@ struct FChunkNeighborhood
     const EVoxelType* NorthData = nullptr;
 
     int32 ChunkSize = 32;
-    int32 MaxHeight = 64;
+    int32 MaxHeight = 128;
     int32 StepY = 32;
     int32 StepZ = 32 * 32;
 
@@ -611,6 +664,7 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                 {
                     float MinCorner = FMath::Min3((*LocalHeightMap)[(lx + 1) + (ly + 1) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 1) * CacheSize],
                         FMath::Min((*LocalHeightMap)[(lx + 1) + (ly + 2) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 2) * CacheSize]));
+                    
                     int32 GroundLevel = FMath::Clamp(FMath::FloorToInt(MinCorner - LocalMinGrassThickness), 0, LocalMaxHeight - 1);
 
                     int32 BaseIdx = lx + ly * LocalChunkSize;
@@ -1030,8 +1084,57 @@ EVoxelType ASmoothVoxelTerrain::GetVoxelAtWorld(int32 WorldX, int32 WorldY, int3
 
 float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) const
 {
-    float NoiseValue = FastValueNoise2D(((float)WorldX + Seed) * NoiseScale, ((float)WorldY + Seed) * NoiseScale) * 2.0f - 1.0f;
-    return (NoiseValue + 1.0f) * HeightMultiplier / CubeSize;
+    float wx = (float)WorldX + Seed;
+    float wy = (float)WorldY + Seed;
+    
+    float globalScale = NoiseScale;
+
+    // Expand biome clustering to [0.0, 1.0] by normalizing common FBM results
+    float rawBiome = FBM2D(wx * BiomeFrequency, wy * BiomeFrequency, 3);
+    float biomeVal = FMath::Clamp((rawBiome - 0.2f) / 0.6f, 0.0f, 1.0f);
+
+    // Domain warp to create organic, non-linear boundaries for the zones
+    float warp = (FBM2D(wx * BiomeFrequency * 3.0f, wy * BiomeFrequency * 3.0f, 2) - 0.5f) * 0.2f;
+    float zoneIdx = FMath::Clamp(biomeVal + warp, 0.0f, 1.0f) * 3.0f; // Scale to [0.0, 3.0]
+
+    // Calculate blending weights between the 4 zones
+    float w0 = FMath::Max(0.0f, 1.0f - FMath::Abs(zoneIdx - 0.0f)); // Flat Grasslands
+    float w1 = FMath::Max(0.0f, 1.0f - FMath::Abs(zoneIdx - 1.0f)); // Rolling Grasslands
+    float w2 = FMath::Max(0.0f, 1.0f - FMath::Abs(zoneIdx - 2.0f)); // Fractured / Abrupt
+    float w3 = FMath::Max(0.0f, 1.0f - FMath::Abs(zoneIdx - 3.0f)); // Sharp / Jagged
+    
+    // Normalize blending weights
+    float sumW = w0 + w1 + w2 + w3;
+    if (sumW > 0.0f) { w0 /= sumW; w1 /= sumW; w2 /= sumW; w3 /= sumW; }
+    else { w0 = 1.0f; w1 = 0.0f; w2 = 0.0f; w3 = 0.0f; }
+
+    float finalHeight = 0.0f;
+
+    // Zone 0: Flat Grasslands - Broad, tiny variations
+    if (w0 > 0.0f) {
+        float h = FBM2D(wx * globalScale * 3.0f, wy * globalScale * 3.0f, 2) * FlatAmplitude;
+        finalHeight += h * w0;
+    }
+    // Zone 1: Rolling Grasslands - Large, smooth undulating hills
+    if (w1 > 0.0f) {
+        float h = FBM2D(wx * globalScale * 0.8f, wy * globalScale * 0.8f, 3) * RollingAmplitude;
+        finalHeight += h * w1;
+    }
+    // Zone 2: Abrupt / Fractured - Smooth step terracing creating flat plateaus and steep cliffs
+    if (w2 > 0.0f) {
+        float baseNoise = FBM2D(wx * globalScale * 0.4f, wy * globalScale * 0.4f, 4) * FracturedAmplitude;
+        float h = TerraceSmooth(baseNoise, TerraceHeight, TerraceSharpness);
+        finalHeight += h * w2;
+    }
+    // Zone 3: Sharp / Jagged - High-relief inclines and aggressive mountain ridges
+    if (w3 > 0.0f) {
+        float h = RidgedFBM2D(wx * globalScale * 0.3f, wy * globalScale * 0.3f, 5) * JaggedAmplitude;
+        finalHeight += h * w3;
+    }
+
+    finalHeight += BaseHeight;
+
+    return (finalHeight * HeightMultiplier) / CubeSize;
 }
 
 float ASmoothVoxelTerrain::GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const
