@@ -83,7 +83,8 @@ struct FChunkNeighborhood
 
     FORCEINLINE EVoxelType GetVoxel(int32 LocalX, int32 LocalY, int32 LocalZ) const
     {
-        if (LocalZ < 0 || LocalZ >= MaxHeight) return EVoxelType::Air;
+        if (LocalZ < 0) return EVoxelType::Stone;
+        if (LocalZ >= MaxHeight) return EVoxelType::Air;
 
         if (uint32(LocalX) < uint32(ChunkSize) && uint32(LocalY) < uint32(ChunkSize))
             return SelfData[LocalX + LocalY * StepY + LocalZ * StepZ];
@@ -97,7 +98,8 @@ struct FChunkNeighborhood
         if (LY < 0) { TargetData = SouthData; LY += ChunkSize; }
         else if (LY >= ChunkSize) { TargetData = NorthData; LY -= ChunkSize; }
 
-        if (!TargetData) return EVoxelType::Air;
+        if (!TargetData) return EVoxelType::Stone;
+
         return TargetData[LX + LY * ChunkSize + LocalZ * StepZ];
     }
 };
@@ -106,6 +108,7 @@ ASmoothVoxelTerrain::ASmoothVoxelTerrain()
 {
     PrimaryActorTick.bCanEverTick = true;
     RootSceneComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+    RootSceneComponent->SetMobility(EComponentMobility::Static);
     RootComponent = RootSceneComponent;
 }
 
@@ -142,7 +145,7 @@ void ASmoothVoxelTerrain::Tick(float DeltaTime)
 
     ProcessTasks();
     UpdateCollisionIfNeeded();
-    UpdateGrassVisibility();
+    UpdateChunkVisibilityAndShadows();
 }
 
 void ASmoothVoxelTerrain::RegisterPlayer(APawn* PlayerPawn)
@@ -255,34 +258,47 @@ void ASmoothVoxelTerrain::HandleBoundaryCrossing(const FIntVector& NewChunkCoord
     for (const FIntVector& c : CoordsToUnload) UnloadChunk(c);
 }
 
-void ASmoothVoxelTerrain::UpdateGrassVisibility()
+void ASmoothVoxelTerrain::UpdateChunkVisibilityAndShadows()
 {
     if (!TrackedPlayerComponent.IsValid()) return;
 
     FVector PlayerLoc = TrackedPlayerComponent->GetComponentLocation();
-    float Radius = GrassRenderDistance * ChunkSize * CubeSize;
-    float RadiusSq = Radius * Radius;
+    float GrassRadiusSq = FMath::Square(GrassRenderDistance * ChunkSize * CubeSize);
+    float ShadowRadiusSq = FMath::Square(ShadowRenderDistance * ChunkSize * CubeSize);
 
     for (auto& Pair : Chunks)
     {
         FVoxelChunk* Chunk = Pair.Value.Get();
-        if (Chunk && Chunk->GrassMeshComponent && Chunk->bGrassGenerated)
+        if (!Chunk) continue;
+
+        FVector ChunkOrigin = ChunkCoordToWorldOrigin(Chunk->Coord);
+        float MinX = ChunkOrigin.X;
+        float MaxX = ChunkOrigin.X + (ChunkSize * CubeSize);
+        float MinY = ChunkOrigin.Y;
+        float MaxY = ChunkOrigin.Y + (ChunkSize * CubeSize);
+
+        float ClosestX = FMath::Clamp(PlayerLoc.X, MinX, MaxX);
+        float ClosestY = FMath::Clamp(PlayerLoc.Y, MinY, MaxY);
+
+        float DistSq = FVector::DistSquaredXY(PlayerLoc, FVector(ClosestX, ClosestY, 0));
+
+        // Grass Culling
+        if (Chunk->GrassMeshComponent && Chunk->bGrassGenerated)
         {
-            FVector ChunkOrigin = ChunkCoordToWorldOrigin(Chunk->Coord);
-            float MinX = ChunkOrigin.X;
-            float MaxX = ChunkOrigin.X + (ChunkSize * CubeSize);
-            float MinY = ChunkOrigin.Y;
-            float MaxY = ChunkOrigin.Y + (ChunkSize * CubeSize);
-
-            float ClosestX = FMath::Clamp(PlayerLoc.X, MinX, MaxX);
-            float ClosestY = FMath::Clamp(PlayerLoc.Y, MinY, MaxY);
-
-            float DistSq = FVector::DistSquaredXY(PlayerLoc, FVector(ClosestX, ClosestY, 0));
-
-            bool bShouldBeVisible = bEnableGrassGeometry && (DistSq <= RadiusSq);
+            bool bShouldBeVisible = bEnableGrassGeometry && (DistSq <= GrassRadiusSq);
             if (Chunk->GrassMeshComponent->IsVisible() != bShouldBeVisible)
             {
                 Chunk->GrassMeshComponent->SetVisibility(bShouldBeVisible);
+            }
+        }
+
+        // Shadow Distance Culling
+        if (Chunk->MeshComponent)
+        {
+            bool bShouldCastShadow = bCastShadow && (DistSq <= ShadowRadiusSq);
+            if (Chunk->MeshComponent->CastShadow != bShouldCastShadow)
+            {
+                Chunk->MeshComponent->SetCastShadow(bShouldCastShadow);
             }
         }
     }
@@ -343,6 +359,7 @@ UDynamicMeshComponent* ASmoothVoxelTerrain::AcquireMeshComponent(bool bIsGrass)
     UDynamicMeshComponent* Comp = NewObject<UDynamicMeshComponent>(this);
     Comp->CreationMethod = EComponentCreationMethod::Instance;
     Comp->SetupAttachment(RootSceneComponent);
+    Comp->SetMobility(EComponentMobility::Static);
     Comp->RegisterComponent();
 
     if (bIsGrass) {
@@ -1584,6 +1601,8 @@ void ASmoothVoxelTerrain::PostEditChangeProperty(FPropertyChangedEvent& Property
                 Pair.Value->MeshComponent->SetCollisionEnabled(CollisionEnabled);
                 Pair.Value->MeshComponent->SetCollisionProfileName(CollisionProfileName);
                 Pair.Value->MeshComponent->SetGenerateOverlapEvents(bGenerateOverlapEvents);
+
+                // Allow inspector to manually overwrite shadow casting, although tick logic will adjust distantly.
                 Pair.Value->MeshComponent->SetCastShadow(bCastShadow);
                 Pair.Value->MeshComponent->SetReceivesDecals(bReceivesDecals);
                 if (GrassMaterial) Pair.Value->MeshComponent->SetMaterial(0, GrassMaterial);

@@ -115,7 +115,7 @@ public:
     void UnloadChunk(const FIntVector& Coord);
     bool CheckNeighborsDataReady(const FIntVector& ChunkCoord);
 
-    void UpdateGrassVisibility();
+    void UpdateChunkVisibilityAndShadows();
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     UMaterialInterface* GrassMaterial = nullptr;
@@ -207,14 +207,17 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Collision")
     bool bGenerateOverlapEvents = false;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Collision")
+    bool bEnableComplexCollision = true;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering")
     bool bCastShadow = true;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering", meta = (EditCondition = "bCastShadow"))
+    int32 ShadowRenderDistance = 8;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering")
     bool bReceivesDecals = true;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Collision")
-    bool bEnableComplexCollision = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering")
     float TextureScale = 0.1f;
