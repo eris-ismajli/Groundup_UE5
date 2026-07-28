@@ -45,8 +45,8 @@ FORCEINLINE float FBM2D(float x, float y, int32 octaves)
     float amplitude = 0.5f;
     float frequency = 1.0f;
     float maxVal = 0.0f;
-    
-    for(int32 i = 0; i < octaves; i++)
+
+    for (int32 i = 0; i < octaves; i++)
     {
         value += FastValueNoise2D(x * frequency, y * frequency) * amplitude;
         maxVal += amplitude;
@@ -67,7 +67,7 @@ FORCEINLINE float RidgedFBM2D(float x, float y, int32 octaves)
     float frequency = 1.0f;
     float maxVal = 0.0f;
 
-    for(int32 i = 0; i < octaves; i++)
+    for (int32 i = 0; i < octaves; i++)
     {
         float n = FastValueNoise2D(x * frequency, y * frequency) * 2.0f - 1.0f;
         n = 1.0f - FMath::Abs(n);
@@ -664,7 +664,7 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                 {
                     float MinCorner = FMath::Min3((*LocalHeightMap)[(lx + 1) + (ly + 1) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 1) * CacheSize],
                         FMath::Min((*LocalHeightMap)[(lx + 1) + (ly + 2) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 2) * CacheSize]));
-                    
+
                     int32 GroundLevel = FMath::Clamp(FMath::FloorToInt(MinCorner - LocalMinGrassThickness), 0, LocalMaxHeight - 1);
 
                     int32 BaseIdx = lx + ly * LocalChunkSize;
@@ -1089,22 +1089,13 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
 
     float globalScale = NoiseScale;
 
-    // Widen the biomes so that when hills/mountains do appear, they cover a broad area
-    float localBiomeFreq = BiomeFrequency * 0.2f;
-
     // Expand biome clustering to [0.0, 1.0] by normalizing common FBM results
-    float rawBiome = FBM2D(wx * localBiomeFreq, wy * localBiomeFreq, 3);
+    float rawBiome = FBM2D(wx * BiomeFrequency, wy * BiomeFrequency, 3);
     float biomeVal = FMath::Clamp((rawBiome - 0.2f) / 0.6f, 0.0f, 1.0f);
 
     // Domain warp to create organic, non-linear boundaries for the zones
-    float warp = (FBM2D(wx * localBiomeFreq * 3.0f, wy * localBiomeFreq * 3.0f, 2) - 0.5f) * 0.2f;
-
-    // LOWERED EXPONENT: Changed from 2.5f to 1.5f. 
-    // 1.0f = Equal mix of everything
-    // 1.5f = Favors flats, but hills/mountains appear moderately
-    // 2.5f = Flats dominate, mountains are very rare
-    float adjustedBiome = FMath::Pow(FMath::Clamp(biomeVal + warp, 0.0f, 1.0f), 1.5f);
-    float zoneIdx = adjustedBiome * 3.0f; // Scale to [0.0, 3.0]
+    float warp = (FBM2D(wx * BiomeFrequency * 3.0f, wy * BiomeFrequency * 3.0f, 2) - 0.5f) * 0.2f;
+    float zoneIdx = FMath::Clamp(biomeVal + warp, 0.0f, 1.0f) * 3.0f; // Scale to [0.0, 3.0]
 
     // Calculate blending weights between the 4 zones
     float w0 = FMath::Max(0.0f, 1.0f - FMath::Abs(zoneIdx - 0.0f)); // Flat Grasslands
@@ -1121,23 +1112,23 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
 
     // Zone 0: Flat Grasslands - Broad, tiny variations
     if (w0 > 0.0f) {
-        float h = FBM2D(wx * globalScale * 1.5f, wy * globalScale * 1.5f, 2) * FlatAmplitude;
+        float h = FBM2D(wx * globalScale * 3.0f, wy * globalScale * 3.0f, 2) * FlatAmplitude;
         finalHeight += h * w0;
     }
-    // Zone 1: Rolling Grasslands - Large, smooth undulating hills (Much wider)
+    // Zone 1: Rolling Grasslands - Large, smooth undulating hills
     if (w1 > 0.0f) {
-        float h = FBM2D(wx * globalScale * 0.2f, wy * globalScale * 0.2f, 3) * RollingAmplitude;
+        float h = FBM2D(wx * globalScale * 0.8f, wy * globalScale * 0.8f, 3) * RollingAmplitude;
         finalHeight += h * w1;
     }
-    // Zone 2: Abrupt / Fractured - Smooth step terracing creating wide flat plateaus and steep cliffs
+    // Zone 2: Abrupt / Fractured - Smooth step terracing creating flat plateaus and steep cliffs
     if (w2 > 0.0f) {
-        float baseNoise = FBM2D(wx * globalScale * 0.12f, wy * globalScale * 0.12f, 4) * FracturedAmplitude;
+        float baseNoise = FBM2D(wx * globalScale * 0.4f, wy * globalScale * 0.4f, 4) * FracturedAmplitude;
         float h = TerraceSmooth(baseNoise, TerraceHeight, TerraceSharpness);
         finalHeight += h * w2;
     }
-    // Zone 3: Sharp / Jagged - Massive, wider mountains avoiding narrow vertical spikes
+    // Zone 3: Sharp / Jagged - High-relief inclines and aggressive mountain ridges
     if (w3 > 0.0f) {
-        float h = RidgedFBM2D(wx * globalScale * 0.08f, wy * globalScale * 0.08f, 5) * JaggedAmplitude;
+        float h = RidgedFBM2D(wx * globalScale * 0.3f, wy * globalScale * 0.3f, 5) * JaggedAmplitude;
         finalHeight += h * w3;
     }
 
@@ -1145,6 +1136,7 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
 
     return (finalHeight * HeightMultiplier) / CubeSize;
 }
+
 float ASmoothVoxelTerrain::GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const
 {
     int32 x0 = FMath::FloorToInt(LocalX);
