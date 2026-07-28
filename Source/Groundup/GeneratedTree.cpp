@@ -12,5 +12,5 @@ AGeneratedTree::AGeneratedTree()
 void AGeneratedTree::BeginPlay()
 {
     Super::BeginPlay();
-    UTreeGenerator::GenerateOakTree(MeshComponent, Seed, TrunkHeight, TrunkRadius, BranchLevels, LeafClusterRadius);
+    UTreeGenerator::GenerateOakTree(MeshComponent, Seed, TrunkHeight, TrunkRadius, BranchLevels, LeafClusterRadius, TrunkMaterial, LeavesMaterial);
 }

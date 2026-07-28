@@ -34,6 +34,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree")
     float LeafClusterRadius = 50.0f;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree")
+    UMaterialInterface* TrunkMaterial = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree")
+    UMaterialInterface* LeavesMaterial = nullptr;
+
 protected:
     virtual void BeginPlay() override;
 };
