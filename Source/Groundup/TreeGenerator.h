@@ -1,5 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #pragma once
 
 #include "CoreMinimal.h"
@@ -7,7 +5,34 @@
 #include "TreeGenerator.generated.h"
 
 class UDynamicMeshComponent;
-class UMaterialInterface;   // <-- added
+class UMaterialInterface;
+
+USTRUCT(BlueprintType)
+struct FTreeItLevelParams
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Shape")
+    float Length = 200.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Shape")
+    float LengthVariance = 30.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Shape", meta = (ClampMin = "1"))
+    int32 Segments = 6;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Shape", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float Jitter = 0.05f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Branching")
+    int32 BranchesSpawned = 4;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Branching")
+    float BranchAngle = 45.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Branching")
+    float GravityBend = 0.05f;
+};
 
 UCLASS()
 class GROUNDUP_API UTreeGenerator : public UBlueprintFunctionLibrary
@@ -15,25 +40,21 @@ class GROUNDUP_API UTreeGenerator : public UBlueprintFunctionLibrary
     GENERATED_BODY()
 
 public:
-    /**
-     * Generates a random oak tree mesh on the given DynamicMeshComponent.
-     * @param DynamicMeshComponent The component to populate.
-     * @param Seed                 Random seed for reproducibility.
-     * @param TrunkHeight          Height of the main trunk.
-     * @param TrunkRadius          Radius at the base of the trunk.
-     * @param BranchLevels         How many generations of branches to create.
-     * @param LeafClusterRadius    Size of the leaf clusters at branch tips.
-     * @param BarkMaterial         (Optional) Material to apply to the trunk and branches (slot 0).
-     * @param LeafMaterial         (Optional) Material to apply to the leaf clusters (slot 1).
-     */
     UFUNCTION(BlueprintCallable, Category = "Tree Generator")
-    static void GenerateOakTree(
+    static void GenerateTreeIt(
         UDynamicMeshComponent* DynamicMeshComponent,
-        int32 Seed = 0,
-        float TrunkHeight = 200.0f,
-        float TrunkRadius = 20.0f,
-        int32 BranchLevels = 3,
-        float LeafClusterRadius = 50.0f,
+        int32 Seed,
+        float TrunkRadius,
+        float BranchRadiusScale,
+        float GlobalTaper,
+        float TrunkFlare,
+        float TrunkFlareHeight,
+        int32 TrunkRidgeFrequency,
+        float TrunkRidgeIntensity,
+        int32 BaseRadialResolution,
+        TArray<FTreeItLevelParams> BranchLevels,
+        float LeafSize = 60.0f,
+        int32 LeafCards = 3,
         UMaterialInterface* BarkMaterial = nullptr,
         UMaterialInterface* LeafMaterial = nullptr
     );

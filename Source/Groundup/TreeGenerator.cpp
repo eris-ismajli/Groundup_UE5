@@ -1,5 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #include "TreeGenerator.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
@@ -10,282 +8,307 @@
 
 using namespace UE::Geometry;
 
-// ----------------------------------------------------------------------
-// Helper: ridged trunk cylinder (bark, material ID = 0)
-// ----------------------------------------------------------------------
-static void AddRidgedCylinder(FDynamicMesh3& Mesh, FRandomStream& Rand,
-    const FVector3d& Start, const FVector3d& End,
-    float RadiusStart, float RadiusEnd,
-    int32 Slices = 12, int32 HeightSegments = 6,
-    float NoiseStrength = 0.25f,
-    FDynamicMeshMaterialAttribute* MaterialIDAttribute = nullptr,
-    FDynamicMeshUVOverlay* UVOverlay = nullptr)
+struct FBranchNode
 {
-    FVector3d Dir = End - Start;
-    double Height = Dir.Length();
-    if (Height < KINDA_SMALL_NUMBER) return;
-    Dir /= Height;
+    FVector3d Pos;
+    FVector3d Dir;
+    FVector3d X;
+    FVector3d Y;
+    float Radius;
+};
 
-    FVector3d Z = Dir;
-    FVector3d X, Y;
-    Z.FindBestAxisVectors(X, Y);
+// ----------------------------------------------------------------------
+// Extrude Spline 
+// ----------------------------------------------------------------------
+static void ExtrudeSpline(FDynamicMesh3& Mesh, const TArray<FBranchNode>& Nodes, int32 Slices,
+    float UVScale, FDynamicMeshMaterialAttribute* MatAttr, FDynamicMeshUVOverlay* UVOverlay,
+    int32 RidgeFreq, float RidgeIntensity)
+{
+    int32 NumNodes = Nodes.Num();
+    if (NumNodes < 2) return;
 
     TArray<TArray<int32>> Rings;
-    Rings.SetNum(HeightSegments + 1);
+    Rings.SetNum(NumNodes);
+    TArray<TArray<int32>> UVRings;
+    UVRings.SetNum(NumNodes);
 
-    for (int32 h = 0; h <= HeightSegments; h++)
+    float CurrentV = 0.0f;
+
+    for (int32 i = 0; i < NumNodes; i++)
     {
-        double t = (double)h / (double)HeightSegments;
-        FVector3d RingCenter = Start + Dir * (t * Height);
-        double BaseRadius = FMath::Lerp(RadiusStart, RadiusEnd, t);
+        const FBranchNode& Node = Nodes[i];
+        Rings[i].SetNum(Slices);
+        UVRings[i].SetNum(Slices + 1);
 
-        Rings[h].SetNum(Slices);
+        if (i > 0) CurrentV += FVector3d::Distance(Nodes[i].Pos, Nodes[i - 1].Pos) * UVScale;
+
+        // Build vertex ring
         for (int32 s = 0; s < Slices; s++)
         {
             double Angle = (double)s / (double)Slices * 2.0 * PI;
-            FVector3d RadialDir = X * FMath::Cos(Angle) + Y * FMath::Sin(Angle);
-            double R = BaseRadius * (1.0 + Rand.FRandRange(-NoiseStrength, NoiseStrength));
-            FVector3d VertexPos = RingCenter + RadialDir * R;
+            float RadiusOffset = 0.0f;
 
-            int32 VertID = Mesh.AppendVertex(VertexPos);
-            Rings[h][s] = VertID;
-
-            if (UVOverlay)
+            if (RidgeFreq > 0 && RidgeIntensity > 0.0f)
             {
-                float U = (float)s / (float)Slices;
-                float V = (float)t;
-                UVOverlay->AppendElement(FVector2f(U, V));
+                RadiusOffset = FMath::Cos(Angle * RidgeFreq) * (Node.Radius * RidgeIntensity);
             }
+
+            float FinalRadius = FMath::Max(0.1f, Node.Radius + RadiusOffset);
+
+            FVector3d Offset = Node.X * FMath::Cos(Angle) + Node.Y * FMath::Sin(Angle);
+            Rings[i][s] = Mesh.AppendVertex(Node.Pos + Offset * FinalRadius);
+        }
+
+        // Build UV elements
+        for (int32 s = 0; s <= Slices; s++)
+        {
+            float U = (float)s / (float)Slices;
+            UVRings[i][s] = UVOverlay ? UVOverlay->AppendElement(FVector2f(U, CurrentV)) : -1;
         }
     }
 
-    for (int32 h = 0; h < HeightSegments; h++)
+    // Stitch quads
+    for (int32 i = 0; i < NumNodes - 1; i++)
     {
         for (int32 s = 0; s < Slices; s++)
         {
             int32 NextS = (s + 1) % Slices;
-            int32 A = Rings[h][s];
-            int32 B = Rings[h][NextS];
-            int32 C = Rings[h + 1][s];
-            int32 D = Rings[h + 1][NextS];
+            int32 A = Rings[i][s];
+            int32 B = Rings[i][NextS];
+            int32 C = Rings[i + 1][s];
+            int32 D = Rings[i + 1][NextS];
 
+            // FIX: Changed to Counter-Clockwise winding order so faces point OUTWARD
             int32 Tri1 = Mesh.AppendTriangle(A, B, C);
             int32 Tri2 = Mesh.AppendTriangle(B, D, C);
 
-            if (MaterialIDAttribute)
+            if (MatAttr)
             {
-                MaterialIDAttribute->SetValue(Tri1, 0); // bark
-                MaterialIDAttribute->SetValue(Tri2, 0);
+                if (Tri1 >= 0) MatAttr->SetValue(Tri1, 0);
+                if (Tri2 >= 0) MatAttr->SetValue(Tri2, 0);
+            }
+
+            if (UVOverlay && Tri1 >= 0 && Tri2 >= 0)
+            {
+                int32 uvA = UVRings[i][s];
+                int32 uvB = UVRings[i][s + 1];
+                int32 uvC = UVRings[i + 1][s];
+                int32 uvD = UVRings[i + 1][s + 1];
+
+                // FIX: Matched UV mapping winding order to the new Triangle order
+                UVOverlay->SetTriangle(Tri1, FIndex3i(uvA, uvB, uvC));
+                UVOverlay->SetTriangle(Tri2, FIndex3i(uvB, uvD, uvC));
             }
         }
     }
 }
 
 // ----------------------------------------------------------------------
-// Helper: smooth branch cylinder (bark, material ID = 0)
+// Leaf Quads
 // ----------------------------------------------------------------------
-static void AddBranchCylinder(FDynamicMesh3& Mesh,
-    const FVector3d& Start, const FVector3d& End,
-    float RadiusStart, float RadiusEnd, int32 Slices = 8,
-    FDynamicMeshMaterialAttribute* MaterialIDAttribute = nullptr,
-    FDynamicMeshUVOverlay* UVOverlay = nullptr)
+static void AddLeafCards(FDynamicMesh3& Mesh, FRandomStream& Rand, const FVector3d& Center,
+    const FVector3d& Dir, float Size, int32 NumCards,
+    FDynamicMeshMaterialAttribute* MatAttr, FDynamicMeshUVOverlay* UVOverlay)
 {
-    FVector3d Dir = End - Start;
-    double Height = Dir.Length();
-    if (Height < KINDA_SMALL_NUMBER) return;
-    Dir /= Height;
-
     FVector3d Z = Dir;
     FVector3d X, Y;
     Z.FindBestAxisVectors(X, Y);
+    float Half = Size * 0.5f;
 
-    TArray<int32> Ring0, Ring1;
-    for (int32 i = 0; i < Slices; i++)
+    for (int32 i = 0; i < NumCards; ++i)
     {
-        double Angle = (double)i / (double)Slices * 2.0 * PI;
-        FVector3d Offset = (X * FMath::Cos(Angle) + Y * FMath::Sin(Angle));
-        Ring0.Add(Mesh.AppendVertex(Start + Offset * RadiusStart));
-        Ring1.Add(Mesh.AppendVertex(End + Offset * RadiusEnd));
+        double Angle = ((double)i / NumCards) * PI + Rand.FRandRange(-0.2, 0.2);
+        FVector3d CardX = X * FMath::Cos(Angle) + Y * FMath::Sin(Angle);
+        FVector3d CardY = Z;
 
-        if (UVOverlay)
+        FVector3d V0 = Center - CardX * Half - CardY * Half;
+        FVector3d V1 = Center + CardX * Half - CardY * Half;
+        FVector3d V2 = Center + CardX * Half + CardY * Half;
+        FVector3d V3 = Center - CardX * Half + CardY * Half;
+
+        int32 Vert0 = Mesh.AppendVertex(V0);
+        int32 Vert1 = Mesh.AppendVertex(V1);
+        int32 Vert2 = Mesh.AppendVertex(V2);
+        int32 Vert3 = Mesh.AppendVertex(V3);
+
+        // FIX: Counter-Clockwise winding order for leaves
+        int32 Tri1 = Mesh.AppendTriangle(Vert0, Vert1, Vert2);
+        int32 Tri2 = Mesh.AppendTriangle(Vert0, Vert2, Vert3);
+
+        if (MatAttr)
         {
-            float U = (float)i / (float)Slices;
-            UVOverlay->AppendElement(FVector2f(U, 0.0f)); // for Ring0
-            UVOverlay->AppendElement(FVector2f(U, 1.0f)); // for Ring1
+            if (Tri1 >= 0) MatAttr->SetValue(Tri1, 1);
+            if (Tri2 >= 0) MatAttr->SetValue(Tri2, 1);
         }
-    }
 
-    for (int32 i = 0; i < Slices; i++)
-    {
-        int32 Next = (i + 1) % Slices;
-        int32 Tri1 = Mesh.AppendTriangle(Ring0[i], Ring1[Next], Ring1[i]);
-        int32 Tri2 = Mesh.AppendTriangle(Ring0[i], Ring0[Next], Ring1[Next]);
-
-        if (MaterialIDAttribute)
+        if (UVOverlay && Tri1 >= 0 && Tri2 >= 0)
         {
-            MaterialIDAttribute->SetValue(Tri1, 0);
-            MaterialIDAttribute->SetValue(Tri2, 0);
+            int32 UV0 = UVOverlay->AppendElement(FVector2f(0.f, 0.f));
+            int32 UV1 = UVOverlay->AppendElement(FVector2f(1.f, 0.f));
+            int32 UV2 = UVOverlay->AppendElement(FVector2f(1.f, 1.f));
+            int32 UV3 = UVOverlay->AppendElement(FVector2f(0.f, 1.f));
+
+            // FIX: Matched UV mapping for leaves
+            UVOverlay->SetTriangle(Tri1, FIndex3i(UV0, UV1, UV2));
+            UVOverlay->SetTriangle(Tri2, FIndex3i(UV0, UV2, UV3));
         }
     }
 }
 
 // ----------------------------------------------------------------------
-// Helper: leaf cluster sphere (leaves, material ID = 1)
+// Core Algorithmic Generation Engine
 // ----------------------------------------------------------------------
-static void AddLeafSphere(FDynamicMesh3& Mesh, const FVector3d& Center, float Radius, int32 Segments = 8,
-    FDynamicMeshMaterialAttribute* MaterialIDAttribute = nullptr,
-    FDynamicMeshUVOverlay* UVOverlay = nullptr)
+static void GenerateBranchTreeItLevel(
+    FDynamicMesh3& Mesh, FRandomStream& Rand, int32 Level,
+    const FVector3d& StartPos, const FVector3d& StartDir,
+    float StartRadius, float GlobalTrunkRadius, float BranchRadiusScale, float GlobalTaper,
+    float TrunkFlare, float TrunkFlareHeight, int32 RidgeFreq, float RidgeIntensity, int32 BaseRes,
+    const TArray<FTreeItLevelParams>& Levels, float LeafSize, int32 LeafCards,
+    FDynamicMeshMaterialAttribute* MatAttr, FDynamicMeshUVOverlay* UVOverlay)
 {
-    int32 StartVert = Mesh.VertexCount();
-    int32 LatSteps = Segments;
-    int32 LongSteps = Segments * 2;
+    if (Level >= Levels.Num()) return;
+    const FTreeItLevelParams& Params = Levels[Level];
 
-    for (int32 j = 0; j <= LatSteps; j++)
+    TArray<FBranchNode> Nodes;
+    FVector3d CurrentPos = StartPos;
+    FVector3d CurrentDir = StartDir.GetSafeNormal();
+    FVector3d CurrentX, CurrentY;
+    CurrentDir.FindBestAxisVectors(CurrentX, CurrentY);
+
+    float ActualLength = FMath::Max(Params.Length + Rand.FRandRange(-Params.LengthVariance, Params.LengthVariance), 5.0f);
+    int32 Segs = FMath::Max(1, Params.Segments);
+    float SegmentLength = ActualLength / (float)Segs;
+
+    for (int32 i = 0; i <= Segs; ++i)
     {
-        double Phi = PI * (double)j / (double)LatSteps;
-        double SinPhi = FMath::Sin(Phi);
-        double CosPhi = FMath::Cos(Phi);
-        for (int32 i = 0; i <= LongSteps; i++)
-        {
-            double Theta = 2.0 * PI * (double)i / (double)LongSteps;
-            double SinTheta = FMath::Sin(Theta);
-            double CosTheta = FMath::Cos(Theta);
-            FVector3d Pos = Center + Radius * FVector3d(SinPhi * CosTheta, SinPhi * SinTheta, CosPhi);
-            Mesh.AppendVertex(Pos);
+        float t = (float)i / Segs;
+        FBranchNode Node;
 
-            if (UVOverlay)
+        Node.Pos = CurrentPos;
+        Node.Dir = CurrentDir;
+        Node.X = CurrentX;
+        Node.Y = CurrentY;
+
+        float BaseRadius = FMath::Lerp(StartRadius, StartRadius * FMath::Clamp(GlobalTaper, 0.f, 1.f), t);
+
+        if (Level == 0 && TrunkFlare > 0.0f && TrunkFlareHeight > 0.01f)
+        {
+            float FlareAlpha = FMath::Clamp(1.0f - (t / TrunkFlareHeight), 0.0f, 1.0f);
+            FlareAlpha = FlareAlpha * FlareAlpha;
+            BaseRadius += (StartRadius * TrunkFlare) * FlareAlpha;
+        }
+
+        Node.Radius = BaseRadius;
+        Nodes.Add(Node);
+
+        if (i < Segs)
+        {
+            FVector3d JitterOffset(Rand.FRandRange(-1.f, 1.f), Rand.FRandRange(-1.f, 1.f), Rand.FRandRange(-1.f, 1.f));
+            FVector3d WanderingDir = (CurrentDir + JitterOffset * Params.Jitter).GetSafeNormal();
+
+            FVector3d GravityOffset(0, 0, -Params.GravityBend);
+            FVector3d NextDir = (WanderingDir + GravityOffset).GetSafeNormal();
+
+            FQuat Rotation = FQuat::FindBetweenNormals(FVector(CurrentDir), FVector(NextDir));
+            CurrentX = FVector3d(Rotation.RotateVector(FVector(CurrentX)));
+            CurrentY = FVector3d(Rotation.RotateVector(FVector(CurrentY)));
+
+            CurrentDir = NextDir;
+            CurrentPos += CurrentDir * SegmentLength;
+        }
+    }
+
+    float RadiusRatio = FMath::Clamp(StartRadius / GlobalTrunkRadius, 0.1f, 1.0f);
+    int32 AlgorithmicResolution = FMath::Max(3, FMath::RoundToInt(BaseRes * RadiusRatio));
+
+    int32 AppliedRidges = (Level == 0) ? RidgeFreq : 0;
+    float AppliedRidgeInt = (Level == 0) ? RidgeIntensity : 0.0f;
+
+    ExtrudeSpline(Mesh, Nodes, AlgorithmicResolution, 0.01f, MatAttr, UVOverlay, AppliedRidges, AppliedRidgeInt);
+
+    bool bIsLastLevel = (Level == Levels.Num() - 1);
+
+    if (!bIsLastLevel)
+    {
+        for (int32 i = 0; i < Params.BranchesSpawned; ++i)
+        {
+            float SpawnT = Rand.FRandRange(0.25f, 0.95f);
+            float FloatIdx = SpawnT * Segs;
+            int32 NodeIdx = FMath::Clamp(FMath::FloorToInt(FloatIdx), 0, Segs - 1);
+            float Alpha = FloatIdx - NodeIdx;
+
+            FVector3d ChildPos = FMath::Lerp(Nodes[NodeIdx].Pos, Nodes[NodeIdx + 1].Pos, Alpha);
+            FVector3d ParentDir = FMath::Lerp(Nodes[NodeIdx].Dir, Nodes[NodeIdx + 1].Dir, Alpha).GetSafeNormal();
+
+            float ParentRadiusAtSpawn = FMath::Lerp(Nodes[NodeIdx].Radius, Nodes[NodeIdx + 1].Radius, Alpha);
+            float ChildStartRadius = ParentRadiusAtSpawn * BranchRadiusScale;
+
+            FVector3d PX, PY;
+            ParentDir.FindBestAxisVectors(PX, PY);
+            double Roll = Rand.FRandRange(0.0, 2.0 * PI);
+            FVector3d OutwardDir = PX * FMath::Cos(Roll) + PY * FMath::Sin(Roll);
+
+            float RadAngle = FMath::DegreesToRadians(Params.BranchAngle + Rand.FRandRange(-15.f, 15.f));
+            FVector3d ChildDir = (ParentDir * FMath::Cos(RadAngle) + OutwardDir * FMath::Sin(RadAngle)).GetSafeNormal();
+
+            GenerateBranchTreeItLevel(
+                Mesh, Rand, Level + 1, ChildPos, ChildDir,
+                ChildStartRadius, GlobalTrunkRadius, BranchRadiusScale, GlobalTaper,
+                TrunkFlare, TrunkFlareHeight, RidgeFreq, RidgeIntensity, BaseRes,
+                Levels, LeafSize, LeafCards, MatAttr, UVOverlay
+            );
+        }
+    }
+    else
+    {
+        AddLeafCards(Mesh, Rand, Nodes.Last().Pos, Nodes.Last().Dir, LeafSize, LeafCards, MatAttr, UVOverlay);
+
+        for (int32 i = FMath::Max(1, Segs - 2); i < Segs; ++i)
+        {
+            if (Rand.FRandRange(0.f, 1.f) > 0.4f)
             {
-                float U = (float)i / (float)LongSteps;
-                float V = (float)j / (float)LatSteps;
-                UVOverlay->AppendElement(FVector2f(U, V));
+                AddLeafCards(Mesh, Rand, Nodes[i].Pos, Nodes[i].X, LeafSize, LeafCards, MatAttr, UVOverlay);
             }
         }
     }
-
-    int32 Columns = LongSteps + 1;
-    for (int32 j = 0; j < LatSteps; j++)
-    {
-        for (int32 i = 0; i < LongSteps; i++)
-        {
-            int32 A = StartVert + j * Columns + i;
-            int32 B = A + 1;
-            int32 C = A + Columns;
-            int32 D = C + 1;
-
-            int32 Tri1 = Mesh.AppendTriangle(A, B, C);
-            int32 Tri2 = Mesh.AppendTriangle(B, D, C);
-
-            if (MaterialIDAttribute)
-            {
-                MaterialIDAttribute->SetValue(Tri1, 1); // leaves
-                MaterialIDAttribute->SetValue(Tri2, 1);
-            }
-        }
-    }
 }
 
-// ----------------------------------------------------------------------
-// Recursive branch generation
-// ----------------------------------------------------------------------
-static void GenerateBranches(FDynamicMesh3& Mesh, FRandomStream& Rand,
-    const FVector3d& Start, const FVector3d& Direction,
-    float Length, float Radius, int32 Level, int32 MaxLevel,
-    float LeafRadius,
-    FDynamicMeshMaterialAttribute* MaterialIDAttribute,
-    FDynamicMeshUVOverlay* UVOverlay)
+void UTreeGenerator::GenerateTreeIt(UDynamicMeshComponent* DynamicMeshComponent,
+    int32 Seed, float TrunkRadius, float BranchRadiusScale, float GlobalTaper,
+    float TrunkFlare, float TrunkFlareHeight, int32 TrunkRidgeFrequency, float TrunkRidgeIntensity, int32 BaseRadialResolution,
+    TArray<FTreeItLevelParams> BranchLevels, float LeafSize, int32 LeafCards,
+    UMaterialInterface* BarkMaterial, UMaterialInterface* LeafMaterial)
 {
-    if (Level > MaxLevel || Length < 5.0f || Radius < 1.0f) return;
-
-    FVector3d End = Start + Direction * Length;
-    float EndRadius = Radius * 0.7f;
-    AddBranchCylinder(Mesh, Start, End, Radius, EndRadius, 8, MaterialIDAttribute, UVOverlay);
-
-    if (Level == MaxLevel)
-    {
-        AddLeafSphere(Mesh, End, LeafRadius, 8, MaterialIDAttribute, UVOverlay);
-        return;
-    }
-
-    int32 NumBranches = Rand.RandRange(2, 4);
-
-    // Main continuation
-    {
-        FVector3d MainDir = Direction.RotateAngleAxis(Rand.RandRange(-20.0f, 20.0f),
-            FVector3d::UpVector.Cross(Direction).GetSafeNormal());
-        MainDir = MainDir.RotateAngleAxis(Rand.RandRange(-15.0f, 15.0f), Direction);
-        float MainLength = Length * Rand.FRandRange(0.6f, 0.9f);
-        GenerateBranches(Mesh, Rand, End, MainDir, MainLength, EndRadius, Level + 1, MaxLevel, LeafRadius,
-            MaterialIDAttribute, UVOverlay);
-    }
-
-    // Side branches
-    for (int32 i = 0; i < NumBranches - 1; i++)
-    {
-        double Angle = 360.0 * (double)i / (double)(NumBranches - 1) + Rand.FRandRange(-20.0, 20.0);
-        FVector3d BranchDir = Direction.RotateAngleAxis(Rand.RandRange(30.0f, 70.0f),
-            FVector3d(0, 0, 1).Cross(Direction).GetSafeNormal());
-        BranchDir = BranchDir.RotateAngleAxis(Angle, Direction);
-        BranchDir.Normalize();
-        float BranchLength = Length * Rand.FRandRange(0.3f, 0.6f);
-        GenerateBranches(Mesh, Rand, End, BranchDir, BranchLength, EndRadius, Level + 1, MaxLevel, LeafRadius,
-            MaterialIDAttribute, UVOverlay);
-    }
-}
-
-// ----------------------------------------------------------------------
-// Main generation function
-// ----------------------------------------------------------------------
-void UTreeGenerator::GenerateOakTree(UDynamicMeshComponent* DynamicMeshComponent,
-    int32 Seed, float TrunkHeight, float TrunkRadius,
-    int32 BranchLevels, float LeafClusterRadius,
-    UMaterialInterface* BarkMaterial,
-    UMaterialInterface* LeafMaterial)
-{
-    if (!DynamicMeshComponent)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("GenerateOakTree: Invalid DynamicMeshComponent."));
-        return;
-    }
+    if (!DynamicMeshComponent || BranchLevels.Num() == 0) return;
 
     FRandomStream Rand(Seed);
     FDynamicMesh3 Mesh;
 
-    // --- Attribute setup (matching your terrain pattern) ---
     Mesh.EnableAttributes();
     FDynamicMeshAttributeSet* Attr = Mesh.Attributes();
-    Attr->SetNumUVLayers(1);               // one UV channel for now
+    Attr->SetNumUVLayers(1);
     Attr->EnableMaterialID();
-    Attr->SetNumNormalLayers(1);           // for normals
+    Attr->SetNumNormalLayers(1);
 
     FDynamicMeshUVOverlay* UVOverlay = Attr->GetUVLayer(0);
-    auto* MaterialIDAttribute = Attr->GetMaterialID();
+    FDynamicMeshMaterialAttribute* MaterialIDAttribute = Attr->GetMaterialID();
 
-    // --- Trunk (ridged, original gentle ridges) ---
-    FVector3d TrunkStart(0, 0, 0);
-    FVector3d TrunkEnd(0, 0, TrunkHeight);
-    float TrunkEndRadius = TrunkRadius * 0.6f;
-    AddRidgedCylinder(Mesh, Rand, TrunkStart, TrunkEnd, TrunkRadius, TrunkEndRadius,
-        12, 6, 0.25f, MaterialIDAttribute, UVOverlay);
+    FVector3d RootPos(0, 0, 0);
+    FVector3d RootDir(0, 0, 1);
 
-    // --- Branches and leaves ---
-    FVector3d TopOfTrunk = TrunkEnd;
-    FVector3d Up(0, 0, 1);
-    GenerateBranches(Mesh, Rand, TopOfTrunk, Up,
-        TrunkHeight * 0.4f, TrunkEndRadius, 1, BranchLevels, LeafClusterRadius,
-        MaterialIDAttribute, UVOverlay);
+    GenerateBranchTreeItLevel(
+        Mesh, Rand, 0, RootPos, RootDir,
+        TrunkRadius, TrunkRadius, BranchRadiusScale, GlobalTaper,
+        TrunkFlare, TrunkFlareHeight, TrunkRidgeFrequency, TrunkRidgeIntensity, BaseRadialResolution,
+        BranchLevels, LeafSize, LeafCards, MaterialIDAttribute, UVOverlay
+    );
 
-    // Extra leaf cluster directly at the top
-    AddLeafSphere(Mesh, TopOfTrunk, LeafClusterRadius * 0.8f, 8, MaterialIDAttribute, UVOverlay);
-
-    // --- Normals ---
     FMeshNormals::QuickComputeVertexNormals(Mesh);
 
-    // --- Apply mesh to component ---
     DynamicMeshComponent->SetMesh(MoveTemp(Mesh));
 
-    // --- Assign materials (slot 0 = bark, slot 1 = leaves) ---
-    if (BarkMaterial)  DynamicMeshComponent->SetMaterial(0, BarkMaterial);
-    if (LeafMaterial)  DynamicMeshComponent->SetMaterial(1, LeafMaterial);
+    if (BarkMaterial) DynamicMeshComponent->SetMaterial(0, BarkMaterial);
+    if (LeafMaterial) DynamicMeshComponent->SetMaterial(1, LeafMaterial);
 
     DynamicMeshComponent->NotifyMeshUpdated();
 }
