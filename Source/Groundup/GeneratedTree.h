@@ -29,13 +29,13 @@ public:
 
     // --- HARMONIOUS RADIUS SYSTEM ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Radius & Shape")
-    float TrunkRadius = 16.0f; // Absolute base radius of the tree
+    float TrunkRadius = 16.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Radius & Shape", meta = (ClampMin = "0.1", ClampMax = "1.0"))
-    float BranchRadiusScale = 0.5f; // Child base radius = Parent radius at spawn point * this scale (Guarantees natural joints)
+    float BranchRadiusScale = 0.5f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Radius & Shape", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float GlobalTaper = 0.1f; // Every branch tapers to this % of its own base radius (e.g., 0.1 = 10%)
+    float GlobalTaper = 0.1f;
 
     // --- TRUNK BASE (Roots) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Trunk Base")
@@ -52,18 +52,30 @@ public:
 
     // --- DYNAMIC RESOLUTION ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Resolution", meta = (ClampMin = "4", ClampMax = "64"))
-    int32 BaseRadialResolution = 16; // Trunk uses this. Twigs automatically scale down to 3 or 4 sides to save polys.
+    int32 BaseRadialResolution = 16;
 
     // --- HIERARCHICAL BRANCHING ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Branching")
     TArray<FTreeItLevelParams> BranchLevels;
 
-    // --- LEAVES ---
+    // --- LEAVES (Anchor & Direction System) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Leaves")
-    float LeafSize = 60.0f;
+    float LeafLength = 70.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Leaves", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+    float LeafWidthScale = 0.6f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Leaves")
     int32 LeafCards = 3;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Leaves", meta = (ClampMin = "-90.0", ClampMax = "90.0"))
+    float LeafPitch = 45.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Leaves")
+    float LeafPitchVariance = 20.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Leaves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float LeafGravityBend = 0.2f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Materials")
     UMaterialInterface* TrunkMaterial;

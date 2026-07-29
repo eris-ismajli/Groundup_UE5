@@ -32,6 +32,10 @@ struct FTreeItLevelParams
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Branching")
     float GravityBend = 0.05f;
+
+    // --- NEW Puffy Leaf Parameter ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Leaves")
+    int32 LeavesSpawned = 0; // Number of leaf clusters distributed across the body of this branch
 };
 
 UCLASS()
@@ -53,8 +57,12 @@ public:
         float TrunkRidgeIntensity,
         int32 BaseRadialResolution,
         TArray<FTreeItLevelParams> BranchLevels,
-        float LeafSize = 60.0f,
-        int32 LeafCards = 3,
+        float LeafLength,
+        float LeafWidthScale,
+        int32 LeafCards,
+        float LeafPitch,
+        float LeafPitchVariance,
+        float LeafGravityBend,
         UMaterialInterface* BarkMaterial = nullptr,
         UMaterialInterface* LeafMaterial = nullptr
     );
