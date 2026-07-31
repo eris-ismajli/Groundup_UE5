@@ -41,6 +41,54 @@ enum class EChunkState : uint8
     MeshReady
 };
 
+USTRUCT(BlueprintType)
+struct FBiomeGrasslandSettings
+{
+    GENERATED_BODY()
+
+    // 1. GLOBAL ELEVATION: Affects the entire world smoothly so the "sea level" isn't a perfectly flat plane
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Global Base Elevation")
+    float GlobalBaseNoiseScale = 0.0005f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Global Base Elevation")
+    float GlobalBaseHeight = 400.0f;
+
+    // 2. FLAT FIELDS: Adds bumps and uneven ground ONLY in flat areas. Fades out when hills/mountains appear.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Flat Fields")
+    float FlatFieldNoiseScale = 0.004f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Flat Fields")
+    float FlatFieldHeight = 150.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Flat Fields", meta = (ClampMin = "1", ClampMax = "6"))
+    int32 FlatFieldOctaves = 3;
+
+    // 3. SMOOTH HILLS
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Smooth Hills", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float SmoothHillLikelihood = 0.4f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Smooth Hills")
+    float SmoothHillMaskScale = 0.0008f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Smooth Hills")
+    float SmoothHillNoiseScale = 0.003f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Smooth Hills")
+    float SmoothHillHeight = 1500.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Smooth Hills")
+    float SmoothHillHeightVariance = 700.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Smooth Hills", meta = (ClampMin = "1", ClampMax = "8"))
+    int32 SmoothHillOctaves = 3;
+
+    // 4. JAGGED HILLS
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float JaggedHillLikelihood = 0.15f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills")
+    float JaggedHillMaskScale = 0.0015f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills")
+    float JaggedHillNoiseScale = 0.015f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills")
+    float JaggedHillHeight = 2500.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills")
+    float JaggedHillHeightVariance = 1200.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills", meta = (ClampMin = "1", ClampMax = "8"))
+    int32 JaggedHillOctaves = 4;
+};
+
 UCLASS()
 class GROUNDUP_API ASmoothVoxelTerrain : public AActor
 {
@@ -133,16 +181,10 @@ public:
     int32 ChunkSize = 32;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    int32 MaxHeight = 128; // Increased for higher relief jagged terrains
+    int32 MaxHeight = 64;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     float CubeSize = 100.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    float NoiseScale = 0.01f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    float HeightMultiplier = 1.0f; // Reset to 1.0 as amplitudes now control local heights
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     float MinGrassThickness = 1.5f;
@@ -153,32 +195,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     bool bSmoothTerrain = false;
 
-    // --- GRASSLAND BIOME SETTINGS ---
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float BiomeFrequency = 0.003f;
+    // --- ADDED BIOME FIELD ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biomes")
+    FBiomeGrasslandSettings GrasslandBiome;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float BaseHeight = 2000.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float FlatAmplitude = 250.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float RollingAmplitude = 1200.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float FracturedAmplitude = 2200.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float TerraceHeight = 400.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float TerraceSharpness = 8.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biome - Grassland")
-    float JaggedAmplitude = 4500.0f;
-
-    // --- GRASS SETTINGS ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     bool bEnableGrassGeometry = true;
 
