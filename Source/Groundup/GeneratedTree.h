@@ -9,7 +9,7 @@ class UDynamicMeshComponent;
 class UMaterialInterface;
 
 UCLASS()
-class GROUNDUP_API AGeneratedTree : public AActor
+class MYPROJECT_API AGeneratedTree : public AActor
 {
     GENERATED_BODY()
 
@@ -21,8 +21,15 @@ protected:
     virtual void OnConstruction(const FTransform& Transform) override;
 
 public:
+    // --- SPLIT COMPONENTS FOR SHADOW CONTROL ---
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Tree")
-    UDynamicMeshComponent* MeshComponent;
+    UDynamicMeshComponent* TrunkMeshComponent;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Tree")
+    UDynamicMeshComponent* LeavesMeshComponent;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Tree")
+    UDynamicMeshComponent* ProxyMeshComponent;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings")
     int32 Seed = 0;
@@ -82,4 +89,7 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Settings|Materials")
     UMaterialInterface* LeavesMaterial;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree|Materials")
+    UMaterialInterface* ShadowMaterial;
 };

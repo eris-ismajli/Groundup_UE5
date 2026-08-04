@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "GroundupCharacter.h"
+#include "MyProjectCharacter.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -9,9 +9,9 @@
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "SmoothVoxelTerrain.h"
-#include "Groundup.h"
+#include "MyProject.h"
 
-AGroundupCharacter::AGroundupCharacter()
+AMyProjectCharacter::AMyProjectCharacter()
 {
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
@@ -45,33 +45,121 @@ AGroundupCharacter::AGroundupCharacter()
 	GetCharacterMovement()->AirControl = 0.5f;
 }
 
-void AGroundupCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+void AMyProjectCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
 		// Jumping
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AGroundupCharacter::DoJumpStart);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AGroundupCharacter::DoJumpEnd);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AMyProjectCharacter::DoJumpStart);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AMyProjectCharacter::DoJumpEnd);
 
 		// Moving
-		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::MoveInput);
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AMyProjectCharacter::MoveInput);
 
 		// Looking/Aiming
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::LookInput);
-		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::LookInput);
+		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AMyProjectCharacter::LookInput);
+		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AMyProjectCharacter::LookInput);
 
-		// Change this line:
-		EnhancedInputComponent->BindAction(BreakBlockAction, ETriggerEvent::Started, this, &AGroundupCharacter::BreakCube);
 	}
 	else
 	{
-		UE_LOG(LogGroundup, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
+		UE_LOG(LogMyProject, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
 	}
 }
 
 
-void AGroundupCharacter::MoveInput(const FInputActionValue& Value)
+void AMyProjectCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+	FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
+	HitTerrain->PlaceVoxel(PlaceLocation);
+}
+
+void AMyProjectCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+	// Nudge the impact point inward along the hit normal to avoid boundary ambiguity
+	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.01f;
+
+	int32 VoxelX, VoxelY, VoxelZ;
+	EVoxelType VoxelType;
+
+	if (HitTerrain->GetVoxelAtWorldPoint(AdjustedPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
+	{
+		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f); // roughly upward
+
+		// Auto‑assist only when clicking the top face AND hitting air
+		if (bIsTopFace && VoxelType == EVoxelType::Air)
+		{
+			// Check the voxel directly below
+			int32 BelowX = VoxelX;
+			int32 BelowY = VoxelY;
+			int32 BelowZ = VoxelZ - 1;
+
+			EVoxelType BelowType = HitTerrain->GetVoxelAtWorld(BelowX, BelowY, BelowZ);
+			if (BelowType != EVoxelType::Air)
+			{
+				VoxelX = BelowX;
+				VoxelY = BelowY;
+				VoxelZ = BelowZ;
+				VoxelType = BelowType;
+			}
+			else
+			{
+				return; // nothing to break
+			}
+		}
+
+		// Only break if we now have a solid voxel
+		if (VoxelType != EVoxelType::Air)
+		{
+			FVector LocalCenter(
+				VoxelX * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
+				VoxelY * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
+				VoxelZ * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f
+			);
+			FVector WorldCenter = HitTerrain->GetActorTransform().TransformPosition(LocalCenter);
+
+			HitTerrain->RemoveVoxel(WorldCenter);
+		}
+	}
+}
+
+void AMyProjectCharacter::ExecuteHighlightVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.1f;
+	// call highlight voxel method
+}
+
+void AMyProjectCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Action) {
+	if (!FirstPersonCameraComponent) return;
+
+	FVector Start = FirstPersonCameraComponent->GetComponentLocation();
+	FVector End = Start + (FirstPersonCameraComponent->GetForwardVector() * 1000.0f);
+
+	FHitResult HitResult;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams))
+	{
+		ASmoothVoxelTerrain* HitTerrain = Cast<ASmoothVoxelTerrain>(HitResult.GetActor());
+		if (HitTerrain)
+		{
+			switch (Action) {
+				case EVoxelInteractionAction::Place:
+					ExecutePlaceVoxel(HitTerrain, HitResult);
+					break;
+				case EVoxelInteractionAction::Break:
+					ExecuteBreakVoxel(HitTerrain, HitResult);
+					break;
+				case EVoxelInteractionAction::Hover:
+					ExecuteHighlightVoxel(HitTerrain, HitResult);
+					break;
+				default:
+					UE_LOG(LogTemp, Error, TEXT("Undefined voxel interaction action."));
+			}
+		}
+	}
+}
+
+void AMyProjectCharacter::MoveInput(const FInputActionValue& Value)
 {
 	// get the Vector2D move axis
 	FVector2D MovementVector = Value.Get<FVector2D>();
@@ -81,7 +169,7 @@ void AGroundupCharacter::MoveInput(const FInputActionValue& Value)
 
 }
 
-void AGroundupCharacter::LookInput(const FInputActionValue& Value)
+void AMyProjectCharacter::LookInput(const FInputActionValue& Value)
 {
 	// get the Vector2D look axis
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
@@ -91,7 +179,7 @@ void AGroundupCharacter::LookInput(const FInputActionValue& Value)
 
 }
 
-void AGroundupCharacter::DoAim(float Yaw, float Pitch)
+void AMyProjectCharacter::DoAim(float Yaw, float Pitch)
 {
 	if (GetController())
 	{
@@ -101,7 +189,7 @@ void AGroundupCharacter::DoAim(float Yaw, float Pitch)
 	}
 }
 
-void AGroundupCharacter::DoMove(float Right, float Forward)
+void AMyProjectCharacter::DoMove(float Right, float Forward)
 {
 	if (GetController())
 	{
@@ -111,103 +199,30 @@ void AGroundupCharacter::DoMove(float Right, float Forward)
 	}
 }
 
-void AGroundupCharacter::DoJumpStart()
+void AMyProjectCharacter::DoJumpStart()
 {
 	// pass Jump to the character
 	Jump();
 }
 
-void AGroundupCharacter::DoJumpEnd()
+void AMyProjectCharacter::DoJumpEnd()
 {
 	// pass StopJumping to the character
 	StopJumping();
 }
 
 
-void AGroundupCharacter::BreakCube()
+void AMyProjectCharacter::RemoveVoxel()
 {
-	if (!FirstPersonCameraComponent) return;
-
-	FVector Start = FirstPersonCameraComponent->GetComponentLocation();
-	FVector End = Start + (FirstPersonCameraComponent->GetForwardVector() * 1000.0f);
-
-	FHitResult HitResult;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-
-	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams))
-	{
-		ASmoothVoxelTerrain* HitTerrain = Cast<ASmoothVoxelTerrain>(HitResult.GetActor());
-		if (HitTerrain)
-		{
-			// Nudge the impact point inward along the hit normal to avoid boundary ambiguity
-			const float Nudge = HitTerrain->CubeSize * 0.01f;
-			FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * Nudge;
-
-			int32 VoxelX, VoxelY, VoxelZ;
-			EVoxelType VoxelType;
-
-			if (HitTerrain->GetVoxelAtWorldPoint(AdjustedPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
-			{
-				bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f); // roughly upward
-
-				// Auto‑assist only when clicking the top face AND hitting air
-				if (bIsTopFace && VoxelType == EVoxelType::Air)
-				{
-					// Check the voxel directly below
-					int32 BelowX = VoxelX;
-					int32 BelowY = VoxelY;
-					int32 BelowZ = VoxelZ - 1;
-
-					EVoxelType BelowType = HitTerrain->GetVoxelAtWorld(BelowX, BelowY, BelowZ);
-					if (BelowType != EVoxelType::Air)
-					{
-						VoxelX = BelowX;
-						VoxelY = BelowY;
-						VoxelZ = BelowZ;
-						VoxelType = BelowType;
-					}
-					else
-					{
-						return; // nothing to break
-					}
-				}
-
-				// Only break if we now have a solid voxel
-				if (VoxelType != EVoxelType::Air)
-				{
-					FVector LocalCenter(
-						VoxelX * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
-						VoxelY * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
-						VoxelZ * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f
-					);
-					FVector WorldCenter = HitTerrain->GetActorTransform().TransformPosition(LocalCenter);
-
-					HitTerrain->RemoveVoxel(WorldCenter);
-				}
-			}
-		}
-	}
+	HandleVoxelInteraction(EVoxelInteractionAction::Break);
 }
 
-void AGroundupCharacter::PlaceCube()
+void AMyProjectCharacter::PlaceVoxel()
 {
-	if (!FirstPersonCameraComponent) return;
+	HandleVoxelInteraction(EVoxelInteractionAction::Place);
+}
 
-	FVector Start = FirstPersonCameraComponent->GetComponentLocation();
-	FVector End = Start + (FirstPersonCameraComponent->GetForwardVector() * 1000.0f);
-
-	FHitResult HitResult;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
-
-	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams))
-	{
-		ASmoothVoxelTerrain* HitTerrain = Cast<ASmoothVoxelTerrain>(HitResult.GetActor());
-		if (HitTerrain)
-		{
-			FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
-			HitTerrain->PlaceVoxel(PlaceLocation);
-		}
-	}
+void AMyProjectCharacter::HoverVoxel()
+{
+	HandleVoxelInteraction(EVoxelInteractionAction::Hover);
 }

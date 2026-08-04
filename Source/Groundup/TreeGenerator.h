@@ -33,37 +33,22 @@ struct FTreeItLevelParams
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Branching")
     float GravityBend = 0.05f;
 
-    // --- NEW Puffy Leaf Parameter ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tree Leaves")
     int32 LeavesSpawned = 0; // Number of leaf clusters distributed across the body of this branch
 };
 
 UCLASS()
-class GROUNDUP_API UTreeGenerator : public UBlueprintFunctionLibrary
+class MYPROJECT_API UTreeGenerator : public UBlueprintFunctionLibrary
 {
     GENERATED_BODY()
 
 public:
     UFUNCTION(BlueprintCallable, Category = "Tree Generator")
     static void GenerateTreeIt(
-        UDynamicMeshComponent* DynamicMeshComponent,
-        int32 Seed,
-        float TrunkRadius,
-        float BranchRadiusScale,
-        float GlobalTaper,
-        float TrunkFlare,
-        float TrunkFlareHeight,
-        int32 TrunkRidgeFrequency,
-        float TrunkRidgeIntensity,
-        int32 BaseRadialResolution,
-        TArray<FTreeItLevelParams> BranchLevels,
-        float LeafLength,
-        float LeafWidthScale,
-        int32 LeafCards,
-        float LeafPitch,
-        float LeafPitchVariance,
-        float LeafGravityBend,
-        UMaterialInterface* BarkMaterial = nullptr,
-        UMaterialInterface* LeafMaterial = nullptr
-    );
+        UDynamicMeshComponent* TrunkComponent, UDynamicMeshComponent* LeavesComponent, UDynamicMeshComponent* ProxyComponent,
+        int32 Seed, float TrunkRadius, float BranchRadiusScale, float GlobalTaper,
+        float TrunkFlare, float TrunkFlareHeight, int32 TrunkRidgeFrequency, float TrunkRidgeIntensity, int32 BaseRadialResolution,
+        TArray<FTreeItLevelParams> BranchLevels, float LeafLength, float LeafWidthScale, int32 LeafCards,
+        float LeafPitch, float LeafPitchVariance, float LeafGravityBend,
+        UMaterialInterface* BarkMaterial, UMaterialInterface* LeafMaterial, UMaterialInterface* ShadowMaterial = nullptr);
 };

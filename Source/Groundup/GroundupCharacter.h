@@ -6,7 +6,7 @@
 #include "GameFramework/Character.h"
 #include "Logging/LogMacros.h"
 #include "SmoothVoxelTerrain.h"
-#include "GroundupCharacter.generated.h"
+#include "MyProjectCharacter.generated.h"
 
 class UInputComponent;
 class USkeletalMeshComponent;
@@ -19,8 +19,16 @@ DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
 /**
  *  A basic first person character
  */
+
+enum class EVoxelInteractionAction : uint8
+{
+	Break,
+	Place,
+	Hover
+};
+
 UCLASS(abstract)
-class AGroundupCharacter : public ACharacter
+class AMyProjectCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
@@ -54,7 +62,7 @@ protected:
 	class UInputAction* BreakBlockAction;
 
 public:
-	AGroundupCharacter();
+	AMyProjectCharacter();
 
 
 
@@ -83,13 +91,19 @@ protected:
 	virtual void DoJumpEnd();
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
-	void BreakCube();
+	void RemoveVoxel();
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
-	void PlaceCube();
+	void PlaceVoxel();
 
-	//void PlaceVoxelAtGrid(ASmoothVoxelTerrain* Terrain, int32 X, int32 Y, int32 Z);
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void HoverVoxel();
 
+	void HandleVoxelInteraction(const EVoxelInteractionAction Action);
+
+	void ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult);
+	void ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult);
+	void ExecuteHighlightVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult);
 
 protected:
 

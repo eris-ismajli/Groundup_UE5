@@ -17,13 +17,17 @@ struct FBranchNode
     float Radius;
 };
 
-// ----------------------------------------------------------------------
-// Extrude Spline 
-// ----------------------------------------------------------------------
-static void ExtrudeSpline(FDynamicMesh3& Mesh, const TArray<FBranchNode>& Nodes, int32 Slices,
-    float UVScale, FDynamicMeshMaterialAttribute* MatAttr, FDynamicMeshUVOverlay* UVOverlay,
-    int32 RidgeFreq, float RidgeIntensity)
+struct FLeafTriangle
 {
+    int32 TriID;
+    FVector3d ClumpCenter;
+};
+
+static void ExtrudeSpline(FDynamicMesh3& TrunkMesh, const TArray<FBranchNode>& Nodes, int32 Slices,
+    float UVScale, int32 RidgeFreq, float RidgeIntensity)
+{
+    FDynamicMeshUVOverlay* UVOverlay = TrunkMesh.Attributes() ? TrunkMesh.Attributes()->GetUVLayer(0) : nullptr;
+
     int32 NumNodes = Nodes.Num();
     if (NumNodes < 2) return;
 
@@ -55,7 +59,7 @@ static void ExtrudeSpline(FDynamicMesh3& Mesh, const TArray<FBranchNode>& Nodes,
             float FinalRadius = FMath::Max(0.1f, Node.Radius + RadiusOffset);
 
             FVector3d Offset = Node.X * FMath::Cos(Angle) + Node.Y * FMath::Sin(Angle);
-            Rings[i][s] = Mesh.AppendVertex(Node.Pos + Offset * FinalRadius);
+            Rings[i][s] = TrunkMesh.AppendVertex(Node.Pos + Offset * FinalRadius);
         }
 
         for (int32 s = 0; s <= Slices; s++)
@@ -75,14 +79,8 @@ static void ExtrudeSpline(FDynamicMesh3& Mesh, const TArray<FBranchNode>& Nodes,
             int32 C = Rings[i + 1][s];
             int32 D = Rings[i + 1][NextS];
 
-            int32 Tri1 = Mesh.AppendTriangle(A, B, C);
-            int32 Tri2 = Mesh.AppendTriangle(B, D, C);
-
-            if (MatAttr)
-            {
-                if (Tri1 >= 0) MatAttr->SetValue(Tri1, 0);
-                if (Tri2 >= 0) MatAttr->SetValue(Tri2, 0);
-            }
+            int32 Tri1 = TrunkMesh.AppendTriangle(A, B, C);
+            int32 Tri2 = TrunkMesh.AppendTriangle(B, D, C);
 
             if (UVOverlay && Tri1 >= 0 && Tri2 >= 0)
             {
@@ -98,14 +96,12 @@ static void ExtrudeSpline(FDynamicMesh3& Mesh, const TArray<FBranchNode>& Nodes,
     }
 }
 
-// ----------------------------------------------------------------------
-// Leaf Spawning (Now dynamic surface snapping!)
-// ----------------------------------------------------------------------
-static void AddLeafCards(FDynamicMesh3& Mesh, FRandomStream& Rand, const FVector3d& SplineCenter,
+static void AddLeafCards(FDynamicMesh3& LeavesMesh, FRandomStream& Rand, const FVector3d& SplineCenter,
     const FVector3d& BranchDir, const FVector3d& BranchX, const FVector3d& BranchY, float LocalRadius,
     float Length, float WidthScale, int32 NumCards, float Pitch, float PitchVar, float GravityBend,
-    FDynamicMeshMaterialAttribute* MatAttr, FDynamicMeshUVOverlay* UVOverlay)
+    TArray<FLeafTriangle>& OutLeafTriangles)
 {
+    FDynamicMeshUVOverlay* UVOverlay = LeavesMesh.Attributes() ? LeavesMesh.Attributes()->GetUVLayer(0) : nullptr;
     float HalfWidth = (Length * WidthScale) * 0.5f;
 
     for (int32 i = 0; i < NumCards; ++i)
@@ -113,7 +109,6 @@ static void AddLeafCards(FDynamicMesh3& Mesh, FRandomStream& Rand, const FVector
         double Angle = ((double)i / NumCards) * 2.0 * PI + Rand.FRandRange(-0.5, 0.5);
         FVector3d Outward = BranchX * FMath::Cos(Angle) + BranchY * FMath::Sin(Angle);
 
-        // FIX: Pushes the Anchor to the bark surface! (0.7 multiplier embeds the stem slightly so there are no floating gaps)
         FVector3d SurfaceAnchor = SplineCenter + Outward * (LocalRadius * 0.7f);
 
         float RandomPitch = FMath::DegreesToRadians(Pitch + Rand.FRandRange(-PitchVar, PitchVar));
@@ -123,30 +118,24 @@ static void AddLeafCards(FDynamicMesh3& Mesh, FRandomStream& Rand, const FVector
         LeafForward = FMath::Lerp(LeafForward, WorldDown, GravityBend).GetSafeNormal();
 
         FVector3d UpRef = FVector3d(0, 0, 1);
-        if (FMath::Abs(LeafForward.Z) > 0.98f)
-        {
-            UpRef = BranchX;
-        }
+        if (FMath::Abs(LeafForward.Z) > 0.98f) { UpRef = BranchX; }
         FVector3d LeafRight = LeafForward.Cross(UpRef).GetSafeNormal();
 
-        FVector3d V0 = SurfaceAnchor - LeafRight * HalfWidth;                     // Bottom Left (Stem)
-        FVector3d V1 = SurfaceAnchor + LeafRight * HalfWidth;                     // Bottom Right (Stem)
-        FVector3d V2 = SurfaceAnchor + LeafRight * HalfWidth + LeafForward * Length; // Top Right (Tip)
-        FVector3d V3 = SurfaceAnchor - LeafRight * HalfWidth + LeafForward * Length; // Top Left (Tip)
+        FVector3d V0 = SurfaceAnchor - LeafRight * HalfWidth;
+        FVector3d V1 = SurfaceAnchor + LeafRight * HalfWidth;
+        FVector3d V2 = SurfaceAnchor + LeafRight * HalfWidth + LeafForward * Length;
+        FVector3d V3 = SurfaceAnchor - LeafRight * HalfWidth + LeafForward * Length;
 
-        int32 Vert0 = Mesh.AppendVertex(V0);
-        int32 Vert1 = Mesh.AppendVertex(V1);
-        int32 Vert2 = Mesh.AppendVertex(V2);
-        int32 Vert3 = Mesh.AppendVertex(V3);
+        int32 Vert0 = LeavesMesh.AppendVertex(V0);
+        int32 Vert1 = LeavesMesh.AppendVertex(V1);
+        int32 Vert2 = LeavesMesh.AppendVertex(V2);
+        int32 Vert3 = LeavesMesh.AppendVertex(V3);
 
-        int32 Tri1 = Mesh.AppendTriangle(Vert0, Vert1, Vert2);
-        int32 Tri2 = Mesh.AppendTriangle(Vert0, Vert2, Vert3);
+        int32 Tri1 = LeavesMesh.AppendTriangle(Vert0, Vert1, Vert2);
+        int32 Tri2 = LeavesMesh.AppendTriangle(Vert0, Vert2, Vert3);
 
-        if (MatAttr)
-        {
-            if (Tri1 >= 0) MatAttr->SetValue(Tri1, 1);
-            if (Tri2 >= 0) MatAttr->SetValue(Tri2, 1);
-        }
+        if (Tri1 >= 0) OutLeafTriangles.Add(FLeafTriangle{ Tri1, SplineCenter });
+        if (Tri2 >= 0) OutLeafTriangles.Add(FLeafTriangle{ Tri2, SplineCenter });
 
         if (UVOverlay && Tri1 >= 0 && Tri2 >= 0)
         {
@@ -161,17 +150,58 @@ static void AddLeafCards(FDynamicMesh3& Mesh, FRandomStream& Rand, const FVector
     }
 }
 
-// ----------------------------------------------------------------------
-// Core Algorithmic Generation Engine
-// ----------------------------------------------------------------------
+static void AddShadowProxy(FDynamicMesh3& ProxyMesh, const FVector3d& ClumpCenter, float ProxySize)
+{
+    FVector3d V0 = ClumpCenter + FVector3d(-ProxySize, -ProxySize, 0);
+    FVector3d V1 = ClumpCenter + FVector3d(ProxySize, -ProxySize, 0);
+    FVector3d V2 = ClumpCenter + FVector3d(ProxySize, ProxySize, 0);
+    FVector3d V3 = ClumpCenter + FVector3d(-ProxySize, ProxySize, 0);
+
+    int32 Vert0 = ProxyMesh.AppendVertex(V0);
+    int32 Vert1 = ProxyMesh.AppendVertex(V1);
+    int32 Vert2 = ProxyMesh.AppendVertex(V2);
+    int32 Vert3 = ProxyMesh.AppendVertex(V3);
+
+    int32 Tri1 = ProxyMesh.AppendTriangle(Vert0, Vert1, Vert2);
+    int32 Tri2 = ProxyMesh.AppendTriangle(Vert0, Vert2, Vert3);
+
+    if (ProxyMesh.Attributes())
+    {
+        FDynamicMeshUVOverlay* UV0 = ProxyMesh.Attributes()->GetUVLayer(0);
+        if (UV0 && Tri1 >= 0 && Tri2 >= 0)
+        {
+            int32 U0 = UV0->AppendElement(FVector2f(0.f, 0.f));
+            int32 U1 = UV0->AppendElement(FVector2f(1.f, 0.f));
+            int32 U2 = UV0->AppendElement(FVector2f(1.f, 1.f));
+            int32 U3 = UV0->AppendElement(FVector2f(0.f, 1.f));
+
+            UV0->SetTriangle(Tri1, FIndex3i(U0, U1, U2));
+            UV0->SetTriangle(Tri2, FIndex3i(U0, U2, U3));
+        }
+
+        FDynamicMeshUVOverlay* UV1 = ProxyMesh.Attributes()->GetUVLayer(1);
+        FDynamicMeshUVOverlay* UV2 = ProxyMesh.Attributes()->GetUVLayer(2);
+        if (UV1 && UV2 && Tri1 >= 0 && Tri2 >= 0)
+        {
+            int32 CenterXY_Idx = UV1->AppendElement(FVector2f(ClumpCenter.X, ClumpCenter.Y));
+            UV1->SetTriangle(Tri1, FIndex3i(CenterXY_Idx, CenterXY_Idx, CenterXY_Idx));
+            UV1->SetTriangle(Tri2, FIndex3i(CenterXY_Idx, CenterXY_Idx, CenterXY_Idx));
+
+            int32 CenterZSize_Idx = UV2->AppendElement(FVector2f(ClumpCenter.Z, ProxySize));
+            UV2->SetTriangle(Tri1, FIndex3i(CenterZSize_Idx, CenterZSize_Idx, CenterZSize_Idx));
+            UV2->SetTriangle(Tri2, FIndex3i(CenterZSize_Idx, CenterZSize_Idx, CenterZSize_Idx));
+        }
+    }
+}
+
 static void GenerateBranchTreeItLevel(
-    FDynamicMesh3& Mesh, FRandomStream& Rand, int32 Level,
+    FDynamicMesh3& TrunkMesh, FDynamicMesh3& LeavesMesh, FDynamicMesh3& ProxyMesh, FRandomStream& Rand, int32 Level,
     const FVector3d& StartPos, const FVector3d& StartDir,
     float StartRadius, float GlobalTrunkRadius, float BranchRadiusScale, float GlobalTaper,
     float TrunkFlare, float TrunkFlareHeight, int32 RidgeFreq, float RidgeIntensity, int32 BaseRes,
     const TArray<FTreeItLevelParams>& Levels, float LeafLength, float LeafWidthScale, int32 LeafCards,
     float LeafPitch, float LeafPitchVar, float LeafGravity,
-    FDynamicMeshMaterialAttribute* MatAttr, FDynamicMeshUVOverlay* UVOverlay)
+    TArray<FLeafTriangle>& OutLeafTriangles)
 {
     if (Level >= Levels.Num()) return;
     const FTreeItLevelParams& Params = Levels[Level];
@@ -231,10 +261,8 @@ static void GenerateBranchTreeItLevel(
     int32 AppliedRidges = (Level == 0) ? RidgeFreq : 0;
     float AppliedRidgeInt = (Level == 0) ? RidgeIntensity : 0.0f;
 
-    ExtrudeSpline(Mesh, Nodes, AlgorithmicResolution, 0.01f, MatAttr, UVOverlay, AppliedRidges, AppliedRidgeInt);
+    ExtrudeSpline(TrunkMesh, Nodes, AlgorithmicResolution, 0.01f, AppliedRidges, AppliedRidgeInt);
 
-
-    // 1. --- SPAWN CHILD BRANCHES ---
     if (Level + 1 < Levels.Num())
     {
         for (int32 i = 0; i < Params.BranchesSpawned; ++i)
@@ -258,18 +286,17 @@ static void GenerateBranchTreeItLevel(
             FVector3d ChildDir = (ParentDir * FMath::Cos(RadAngle) + OutwardDir * FMath::Sin(RadAngle)).GetSafeNormal();
 
             GenerateBranchTreeItLevel(
-                Mesh, Rand, Level + 1, ChildPos, ChildDir,
+                TrunkMesh, LeavesMesh, ProxyMesh, Rand, Level + 1, ChildPos, ChildDir,
                 ChildStartRadius, GlobalTrunkRadius, BranchRadiusScale, GlobalTaper,
                 TrunkFlare, TrunkFlareHeight, RidgeFreq, RidgeIntensity, BaseRes,
-                Levels, LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVar, LeafGravity, MatAttr, UVOverlay
+                Levels, LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVar, LeafGravity,
+                OutLeafTriangles
             );
         }
     }
 
-    // 2. --- SPAWN BODY LEAVES (The "Puffy" implementation!) ---
     for (int32 i = 0; i < Params.LeavesSpawned; ++i)
     {
-        // Pick a random spot along the body of the branch
         float SpawnT = Rand.FRandRange(0.1f, 0.95f);
         float FloatIdx = SpawnT * Segs;
         int32 NodeIdx = FMath::Clamp(FMath::FloorToInt(FloatIdx), 0, Segs - 1);
@@ -282,58 +309,104 @@ static void GenerateBranchTreeItLevel(
         FVector3d PX, PY;
         ParentDir.FindBestAxisVectors(PX, PY);
 
-        AddLeafCards(Mesh, Rand, LeafCenterPos, ParentDir, PX, PY, ParentRadiusAtSpawn,
-            LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVar, LeafGravity, MatAttr, UVOverlay);
+        AddLeafCards(LeavesMesh, Rand, LeafCenterPos, ParentDir, PX, PY, ParentRadiusAtSpawn,
+            LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVar, LeafGravity, OutLeafTriangles);
+
+        float ClumpRadius = (ParentRadiusAtSpawn * 0.7f) + LeafLength;
+        AddShadowProxy(ProxyMesh, LeafCenterPos, ClumpRadius);
     }
 
-    // 3. --- SPAWN TIP LEAVES ---
-    bool bIsLastLevel = (Level == Levels.Num() - 1);
-    if (bIsLastLevel)
+    if (Level == Levels.Num() - 1)
     {
-        // Cap off the very end of the twig with a beautiful leaf cluster
-        AddLeafCards(Mesh, Rand, Nodes.Last().Pos, Nodes.Last().Dir, Nodes.Last().X, Nodes.Last().Y, Nodes.Last().Radius,
-            LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVar, LeafGravity, MatAttr, UVOverlay);
+        AddLeafCards(LeavesMesh, Rand, Nodes.Last().Pos, Nodes.Last().Dir, Nodes.Last().X, Nodes.Last().Y, Nodes.Last().Radius,
+            LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVar, LeafGravity, OutLeafTriangles);
+
+        float ClumpRadius = (Nodes.Last().Radius * 0.7f) + LeafLength;
+        AddShadowProxy(ProxyMesh, Nodes.Last().Pos, ClumpRadius);
     }
 }
 
-void UTreeGenerator::GenerateTreeIt(UDynamicMeshComponent* DynamicMeshComponent,
+void UTreeGenerator::GenerateTreeIt(
+    UDynamicMeshComponent* TrunkComponent, UDynamicMeshComponent* LeavesComponent, UDynamicMeshComponent* ProxyComponent,
     int32 Seed, float TrunkRadius, float BranchRadiusScale, float GlobalTaper,
     float TrunkFlare, float TrunkFlareHeight, int32 TrunkRidgeFrequency, float TrunkRidgeIntensity, int32 BaseRadialResolution,
     TArray<FTreeItLevelParams> BranchLevels, float LeafLength, float LeafWidthScale, int32 LeafCards,
     float LeafPitch, float LeafPitchVariance, float LeafGravityBend,
-    UMaterialInterface* BarkMaterial, UMaterialInterface* LeafMaterial)
+    UMaterialInterface* BarkMaterial, UMaterialInterface* LeafMaterial, UMaterialInterface* ShadowMaterial)
 {
-    if (!DynamicMeshComponent || BranchLevels.Num() == 0) return;
+    if (!TrunkComponent || !LeavesComponent || !ProxyComponent || BranchLevels.Num() == 0) return;
 
     FRandomStream Rand(Seed);
-    FDynamicMesh3 Mesh;
 
-    Mesh.EnableAttributes();
-    FDynamicMeshAttributeSet* Attr = Mesh.Attributes();
-    Attr->SetNumUVLayers(1);
-    Attr->EnableMaterialID();
-    Attr->SetNumNormalLayers(1);
+    // Three distinct meshes for component splitting
+    FDynamicMesh3 TrunkMesh;
+    TrunkMesh.EnableAttributes();
+    TrunkMesh.Attributes()->SetNumNormalLayers(1);
+    TrunkMesh.Attributes()->SetNumUVLayers(1);
 
-    FDynamicMeshUVOverlay* UVOverlay = Attr->GetUVLayer(0);
-    FDynamicMeshMaterialAttribute* MaterialIDAttribute = Attr->GetMaterialID();
+    FDynamicMesh3 LeavesMesh;
+    LeavesMesh.EnableAttributes();
+    LeavesMesh.Attributes()->SetNumNormalLayers(1);
+    LeavesMesh.Attributes()->SetNumUVLayers(1);
+
+    FDynamicMesh3 ProxyMesh;
+    ProxyMesh.EnableAttributes();
+    ProxyMesh.Attributes()->SetNumNormalLayers(1);
+    ProxyMesh.Attributes()->SetNumUVLayers(3); // 3 layers for encoding ClumpCenter & ProxySize
 
     FVector3d RootPos(0, 0, 0);
     FVector3d RootDir(0, 0, 1);
 
+    TArray<FLeafTriangle> LeafTriangles;
+
     GenerateBranchTreeItLevel(
-        Mesh, Rand, 0, RootPos, RootDir,
+        TrunkMesh, LeavesMesh, ProxyMesh, Rand, 0, RootPos, RootDir,
         TrunkRadius, TrunkRadius, BranchRadiusScale, GlobalTaper,
         TrunkFlare, TrunkFlareHeight, TrunkRidgeFrequency, TrunkRidgeIntensity, BaseRadialResolution,
         BranchLevels, LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVariance, LeafGravityBend,
-        MaterialIDAttribute, UVOverlay
+        LeafTriangles
     );
 
-    FMeshNormals::QuickComputeVertexNormals(Mesh);
+    // Compute standard vertex normals
+    FMeshNormals::QuickComputeVertexNormals(TrunkMesh);
+    FMeshNormals::QuickComputeVertexNormals(ProxyMesh);
+    FMeshNormals::QuickComputeVertexNormals(LeavesMesh);
 
-    DynamicMeshComponent->SetMesh(MoveTemp(Mesh));
+    // Rule 1 applied: Normals face away from the center of each leaf clump for beautifully rounded lighting.
+    FDynamicMeshNormalOverlay* NormalOverlay = LeavesMesh.Attributes()->GetNormalLayer(0);
+    if (NormalOverlay)
+    {
+        for (const FLeafTriangle& LeafTri : LeafTriangles)
+        {
+            FIndex3i TriVerts = LeavesMesh.GetTriangle(LeafTri.TriID);
+            FVector3d V0 = LeavesMesh.GetVertex(TriVerts.A);
+            FVector3d V1 = LeavesMesh.GetVertex(TriVerts.B);
+            FVector3d V2 = LeavesMesh.GetVertex(TriVerts.C);
 
-    if (BarkMaterial) DynamicMeshComponent->SetMaterial(0, BarkMaterial);
-    if (LeafMaterial) DynamicMeshComponent->SetMaterial(1, LeafMaterial);
+            FVector3f N0 = (FVector3f)(V0 - LeafTri.ClumpCenter).GetSafeNormal();
+            FVector3f N1 = (FVector3f)(V1 - LeafTri.ClumpCenter).GetSafeNormal();
+            FVector3f N2 = (FVector3f)(V2 - LeafTri.ClumpCenter).GetSafeNormal();
 
-    DynamicMeshComponent->NotifyMeshUpdated();
+            int32 Elem0 = NormalOverlay->AppendElement(N0);
+            int32 Elem1 = NormalOverlay->AppendElement(N1);
+            int32 Elem2 = NormalOverlay->AppendElement(N2);
+
+            NormalOverlay->SetTriangle(LeafTri.TriID, FIndex3i(Elem0, Elem1, Elem2));
+        }
+    }
+
+    // Pass geometry to each component
+    TrunkComponent->SetMesh(MoveTemp(TrunkMesh));
+    LeavesComponent->SetMesh(MoveTemp(LeavesMesh));
+    ProxyComponent->SetMesh(MoveTemp(ProxyMesh));
+
+    // Because they are fully separate components, the material always goes into Index 0
+    if (BarkMaterial) TrunkComponent->SetMaterial(0, BarkMaterial);
+    if (LeafMaterial) LeavesComponent->SetMaterial(0, LeafMaterial);
+    if (ShadowMaterial) ProxyComponent->SetMaterial(0, ShadowMaterial);
+
+    // Notify updates
+    TrunkComponent->NotifyMeshUpdated();
+    LeavesComponent->NotifyMeshUpdated();
+    ProxyComponent->NotifyMeshUpdated();
 }

@@ -6,8 +6,20 @@ AGeneratedTree::AGeneratedTree()
 {
     PrimaryActorTick.bCanEverTick = false;
 
-    MeshComponent = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("MeshComponent"));
-    RootComponent = MeshComponent;
+    // 1. Trunk Component (Normal settings, standard shadowing)
+    TrunkMeshComponent = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("TrunkMeshComponent"));
+    RootComponent = TrunkMeshComponent;
+
+    // 2. Leaves Component (NO SHADOWS for massive performance gain and zero self-shadowing)
+    LeavesMeshComponent = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("LeavesMeshComponent"));
+    LeavesMeshComponent->SetupAttachment(RootComponent);
+    LeavesMeshComponent->SetCastShadow(false);
+
+    // 3. Proxy Component (INVISIBLE but CASTS SHADOWS to preserve ground silhouette)
+    ProxyMeshComponent = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("ProxyMeshComponent"));
+    ProxyMeshComponent->SetupAttachment(RootComponent);
+    ProxyMeshComponent->SetVisibility(false);
+    ProxyMeshComponent->bCastHiddenShadow = true;
 
     // --- The Default Array now handles BODY LEAVES (LeavesSpawned) ---
 
@@ -35,10 +47,11 @@ void AGeneratedTree::BeginPlay()
     Super::BeginPlay();
 
     UTreeGenerator::GenerateTreeIt(
-        MeshComponent, Seed, TrunkRadius, BranchRadiusScale, GlobalTaper,
+        TrunkMeshComponent, LeavesMeshComponent, ProxyMeshComponent,
+        Seed, TrunkRadius, BranchRadiusScale, GlobalTaper,
         TrunkFlare, TrunkFlareHeight, TrunkRidgeFrequency, TrunkRidgeIntensity, BaseRadialResolution,
         BranchLevels, LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVariance, LeafGravityBend,
-        TrunkMaterial, LeavesMaterial
+        TrunkMaterial, LeavesMaterial, ShadowMaterial
     );
 }
 
@@ -47,9 +60,10 @@ void AGeneratedTree::OnConstruction(const FTransform& Transform)
     Super::OnConstruction(Transform);
 
     UTreeGenerator::GenerateTreeIt(
-        MeshComponent, Seed, TrunkRadius, BranchRadiusScale, GlobalTaper,
+        TrunkMeshComponent, LeavesMeshComponent, ProxyMeshComponent,
+        Seed, TrunkRadius, BranchRadiusScale, GlobalTaper,
         TrunkFlare, TrunkFlareHeight, TrunkRidgeFrequency, TrunkRidgeIntensity, BaseRadialResolution,
         BranchLevels, LeafLength, LeafWidthScale, LeafCards, LeafPitch, LeafPitchVariance, LeafGravityBend,
-        TrunkMaterial, LeavesMaterial
+        TrunkMaterial, LeavesMaterial, ShadowMaterial
     );
 }
