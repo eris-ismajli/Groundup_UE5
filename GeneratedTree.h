@@ -9,7 +9,7 @@ class UDynamicMeshComponent;
 class UMaterialInterface;
 
 UCLASS()
-class MYPROJECT_API AGeneratedTree : public AActor
+class GROUNDUP_API AGeneratedTree : public AActor
 {
     GENERATED_BODY()
 

@@ -38,7 +38,7 @@ struct FTreeItLevelParams
 };
 
 UCLASS()
-class MYPROJECT_API UTreeGenerator : public UBlueprintFunctionLibrary
+class GROUNDUP_API UTreeGenerator : public UBlueprintFunctionLibrary
 {
     GENERATED_BODY()
 

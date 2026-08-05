@@ -1,6 +1,6 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "MyProjectCharacter.h"
+#include "GroundupCharacter.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -9,9 +9,9 @@
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "SmoothVoxelTerrain.h"
-#include "MyProject.h"
+#include "Groundup.h"
 
-AMyProjectCharacter::AMyProjectCharacter()
+AGroundupCharacter::AGroundupCharacter()
 {
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
@@ -45,36 +45,36 @@ AMyProjectCharacter::AMyProjectCharacter()
 	GetCharacterMovement()->AirControl = 0.5f;
 }
 
-void AMyProjectCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+void AGroundupCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
 		// Jumping
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AMyProjectCharacter::DoJumpStart);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AMyProjectCharacter::DoJumpEnd);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AGroundupCharacter::DoJumpStart);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AGroundupCharacter::DoJumpEnd);
 
 		// Moving
-		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AMyProjectCharacter::MoveInput);
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::MoveInput);
 
 		// Looking/Aiming
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AMyProjectCharacter::LookInput);
-		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AMyProjectCharacter::LookInput);
+		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::LookInput);
+		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::LookInput);
 
 	}
 	else
 	{
-		UE_LOG(LogMyProject, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
+		UE_LOG(LogGroundup, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
 	}
 }
 
 
-void AMyProjectCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
 	FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
 	HitTerrain->PlaceVoxel(PlaceLocation);
 }
 
-void AMyProjectCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
 	// Nudge the impact point inward along the hit normal to avoid boundary ambiguity
 	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.01f;
 
@@ -122,12 +122,12 @@ void AMyProjectCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHi
 	}
 }
 
-void AMyProjectCharacter::ExecuteHighlightVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecuteHighlightVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
 	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.1f;
 	// call highlight voxel method
 }
 
-void AMyProjectCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Action) {
+void AGroundupCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Action) {
 	if (!FirstPersonCameraComponent) return;
 
 	FVector Start = FirstPersonCameraComponent->GetComponentLocation();
@@ -159,7 +159,7 @@ void AMyProjectCharacter::HandleVoxelInteraction(const EVoxelInteractionAction A
 	}
 }
 
-void AMyProjectCharacter::MoveInput(const FInputActionValue& Value)
+void AGroundupCharacter::MoveInput(const FInputActionValue& Value)
 {
 	// get the Vector2D move axis
 	FVector2D MovementVector = Value.Get<FVector2D>();
@@ -169,7 +169,7 @@ void AMyProjectCharacter::MoveInput(const FInputActionValue& Value)
 
 }
 
-void AMyProjectCharacter::LookInput(const FInputActionValue& Value)
+void AGroundupCharacter::LookInput(const FInputActionValue& Value)
 {
 	// get the Vector2D look axis
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
@@ -179,7 +179,7 @@ void AMyProjectCharacter::LookInput(const FInputActionValue& Value)
 
 }
 
-void AMyProjectCharacter::DoAim(float Yaw, float Pitch)
+void AGroundupCharacter::DoAim(float Yaw, float Pitch)
 {
 	if (GetController())
 	{
@@ -189,7 +189,7 @@ void AMyProjectCharacter::DoAim(float Yaw, float Pitch)
 	}
 }
 
-void AMyProjectCharacter::DoMove(float Right, float Forward)
+void AGroundupCharacter::DoMove(float Right, float Forward)
 {
 	if (GetController())
 	{
@@ -199,30 +199,30 @@ void AMyProjectCharacter::DoMove(float Right, float Forward)
 	}
 }
 
-void AMyProjectCharacter::DoJumpStart()
+void AGroundupCharacter::DoJumpStart()
 {
 	// pass Jump to the character
 	Jump();
 }
 
-void AMyProjectCharacter::DoJumpEnd()
+void AGroundupCharacter::DoJumpEnd()
 {
 	// pass StopJumping to the character
 	StopJumping();
 }
 
 
-void AMyProjectCharacter::RemoveVoxel()
+void AGroundupCharacter::RemoveVoxel()
 {
 	HandleVoxelInteraction(EVoxelInteractionAction::Break);
 }
 
-void AMyProjectCharacter::PlaceVoxel()
+void AGroundupCharacter::PlaceVoxel()
 {
 	HandleVoxelInteraction(EVoxelInteractionAction::Place);
 }
 
-void AMyProjectCharacter::HoverVoxel()
+void AGroundupCharacter::HoverVoxel()
 {
 	HandleVoxelInteraction(EVoxelInteractionAction::Hover);
 }

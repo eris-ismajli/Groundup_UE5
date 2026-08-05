@@ -6,7 +6,7 @@
 #include "GameFramework/Character.h"
 #include "Logging/LogMacros.h"
 #include "SmoothVoxelTerrain.h"
-#include "MyProjectCharacter.generated.h"
+#include "GroundupCharacter.generated.h"
 
 class UInputComponent;
 class USkeletalMeshComponent;
@@ -28,7 +28,7 @@ enum class EVoxelInteractionAction : uint8
 };
 
 UCLASS(abstract)
-class AMyProjectCharacter : public ACharacter
+class AGroundupCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
@@ -62,7 +62,7 @@ protected:
 	class UInputAction* BreakBlockAction;
 
 public:
-	AMyProjectCharacter();
+	AGroundupCharacter();
 
 
 

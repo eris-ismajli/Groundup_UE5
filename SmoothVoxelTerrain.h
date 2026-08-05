@@ -89,6 +89,7 @@ struct FBiomeGrasslandSettings
     int32 JaggedHillOctaves = 4;
 };
 
+
 UCLASS()
 class GROUNDUP_API ASmoothVoxelTerrain : public AActor
 {
@@ -195,7 +196,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     bool bSmoothTerrain = false;
 
-    // --- ADDED BIOME FIELD ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biomes")
     FBiomeGrasslandSettings GrasslandBiome;
 

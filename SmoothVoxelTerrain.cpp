@@ -658,6 +658,7 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
         });
 }
 
+
 void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
 {
     FVoxelChunk* Chunk = GetChunk(ChunkCoord);
@@ -1299,12 +1300,12 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
                 }
             };
 
-        if (bExposedTop) AddQuadWorldFast(p001, p011, p111, p101, FVector3f(0.f, 0.f, 1.f), TopMatID, 0, 1);
-        if (bExposedBottom) AddQuadWorldFast(p100, p110, p010, p000, FVector3f(0.f, 0.f, -1.f), BottomMatID, 0, 1);
-        if (bExposedEast) AddQuadWorldFast(p100, p101, p111, p110, FVector3f(1.f, 0.f, 0.f), SideMatID, 1, 2);
-        if (bExposedWest) AddQuadWorldFast(p010, p011, p001, p000, FVector3f(-1.f, 0.f, 0.f), SideMatID, 1, 2);
-        if (bExposedNorth) AddQuadWorldFast(p110, p111, p011, p010, FVector3f(0.f, 1.f, 0.f), SideMatID, 0, 2);
-        if (bExposedSouth) AddQuadWorldFast(p000, p001, p101, p100, FVector3f(0.f, -1.f, 0.f), SideMatID, 0, 2);
+        if (bExposedTop) AddQuadWorldFast(p001, p101, p111, p011, FVector3f(0.f, 0.f, 1.f), TopMatID, 0, 1);
+        if (bExposedBottom) AddQuadWorldFast(p100, p000, p010, p110, FVector3f(0.f, 0.f, -1.f), BottomMatID, 0, 1);
+        if (bExposedEast) AddQuadWorldFast(p100, p110, p111, p101, FVector3f(1.f, 0.f, 0.f), SideMatID, 1, 2);
+        if (bExposedWest) AddQuadWorldFast(p010, p000, p001, p011, FVector3f(-1.f, 0.f, 0.f), SideMatID, 1, 2);
+        if (bExposedNorth) AddQuadWorldFast(p110, p010, p011, p111, FVector3f(0.f, 1.f, 0.f), SideMatID, 0, 2);
+        if (bExposedSouth) AddQuadWorldFast(p000, p100, p101, p001, FVector3f(0.f, -1.f, 0.f), SideMatID, 0, 2);
     }
     else
     {
@@ -1357,8 +1358,7 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
             FVector n01 = GetSmoothNormalLocal(lx, ly + 1, HeightGrid);
             FVector n11 = GetSmoothNormalLocal(lx + 1, ly + 1, HeightGrid);
 
-            auto AddTopQuadSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector& nA, const FVector& nB, const FVector& nC, const FVector& nD, int32 MatID)
-                {
+            auto AddTopQuadSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector& nA, const FVector& nB, const FVector& nC, const FVector& nD, int32 MatID) {
                     FVector2D uvA((float)A.X / CubeSize * TextureScale, (float)A.Y / CubeSize * TextureScale);
                     FVector2D uvB((float)B.X / CubeSize * TextureScale, (float)B.Y / CubeSize * TextureScale);
                     FVector2D uvC((float)C.X / CubeSize * TextureScale, (float)C.Y / CubeSize * TextureScale);
@@ -1375,10 +1375,12 @@ void ASmoothVoxelTerrain::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FD
                         ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
                         if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
                     }
+
                     int32 t2 = Mesh.AppendTriangle(vA, vC, vD);
                     if (t2 != FDynamicMesh3::InvalidID) {
                         OutTriIDs.Add(t2);
-                        NormalOverlay->SetTriangle(t2, FIndex3i(NormalOverlay->AppendElement(FVector3f(nA)), NormalOverlay->AppendElement(FVector3f(nA)), NormalOverlay->AppendElement(FVector3f(nD))));
+                        // FIXED TYPO: Replaced the second nA with nC to map to vC correctly!
+                        NormalOverlay->SetTriangle(t2, FIndex3i(NormalOverlay->AppendElement(FVector3f(nA)), NormalOverlay->AppendElement(FVector3f(nC)), NormalOverlay->AppendElement(FVector3f(nD))));
                         UVOverlay->SetTriangle(t2, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvC)), UVOverlay->AppendElement(FVector2f(uvD))));
                         ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
                         if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
