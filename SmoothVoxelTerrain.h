@@ -89,7 +89,6 @@ struct FBiomeGrasslandSettings
     int32 JaggedHillOctaves = 4;
 };
 
-
 UCLASS()
 class GROUNDUP_API ASmoothVoxelTerrain : public AActor
 {
@@ -105,15 +104,17 @@ public:
 
         bool bGeneratingGrass = false;
         bool bGrassGenerated = false;
+        bool bWaterGenerated = false;
 
-        TSharedPtr<TArray<EVoxelType>> VoxelData;
-        TSharedPtr<TArray<float>> HeightMap;
+        TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> VoxelData;
+        TSharedPtr<TArray<float>, ESPMode::ThreadSafe> HeightMap;
 
         TMap<int32, FTriIDArray> VoxelTriangles;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
 
         UDynamicMeshComponent* MeshComponent = nullptr;
         UDynamicMeshComponent* GrassMeshComponent = nullptr;
+        UDynamicMeshComponent* WaterMeshComponent = nullptr;
 
         void UpdateVoxel(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
         void UpdateVoxelMesh(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
@@ -178,11 +179,20 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     UMaterialInterface* GrassBladesMaterial = nullptr;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
+    UMaterialInterface* WaterMaterial = nullptr;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     int32 ChunkSize = 32;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    int32 MaxHeight = 64;
+    int32 FloorLevel = 40;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
+    int32 BedrockLevel = -64;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
+    int32 MaxHeight = 256;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     float CubeSize = 100.0f;
@@ -195,6 +205,12 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     bool bSmoothTerrain = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Water")
+    bool bEnableWater = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Water")
+    int32 SeaLevel = 38;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biomes")
     FBiomeGrasslandSettings GrasslandBiome;
@@ -324,12 +340,14 @@ private:
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
     };
 
-    TArray<TSharedPtr<FMeshApplyTask>> MeshApplyQueue;
-    TArray<TSharedPtr<FGrassApplyTask>> GrassApplyQueue;
+    TArray<TSharedPtr<FMeshApplyTask, ESPMode::ThreadSafe>> MeshApplyQueue;
+    TArray<TSharedPtr<FGrassApplyTask, ESPMode::ThreadSafe>> GrassApplyQueue;
 
     TArray<UDynamicMeshComponent*> MeshComponentPool;
     TArray<UDynamicMeshComponent*> GrassMeshComponentPool;
+    TArray<UDynamicMeshComponent*> WaterMeshComponentPool;
 
-    UDynamicMeshComponent* AcquireMeshComponent(bool bIsGrass);
-    void ReleaseMeshComponent(UDynamicMeshComponent* Comp, bool bIsGrass);
+    // MeshType: 0 = Terrain, 1 = Grass, 2 = Water
+    UDynamicMeshComponent* AcquireMeshComponent(int32 MeshType);
+    void ReleaseMeshComponent(UDynamicMeshComponent* Comp, int32 MeshType);
 };
