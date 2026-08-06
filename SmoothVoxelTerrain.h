@@ -52,7 +52,7 @@ struct FBiomeGrasslandSettings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Global Base Elevation")
     float GlobalBaseHeight = 400.0f;
 
-    // 2. FLAT FIELDS: Adds bumps and uneven ground ONLY in flat areas. Fades out when hills/mountains appear.
+    // 2. FLAT FIELDS: Adds bumps and uneven ground ONLY in flat areas. Fades out when hills/mountains/plains appear.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Flat Fields")
     float FlatFieldNoiseScale = 0.004f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Flat Fields")
@@ -87,6 +87,32 @@ struct FBiomeGrasslandSettings
     float JaggedHillHeightVariance = 1200.0f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Jagged Hills", meta = (ClampMin = "1", ClampMax = "8"))
     int32 JaggedHillOctaves = 4;
+
+    // 5. PLAINS: Vast landscapes dominated horizontally rather than vertically.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Plains", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float PlainsLikelihood = 0.3f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Plains")
+    float PlainsMaskScale = 0.0006f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Plains")
+    float PlainsNoiseScale = 0.0004f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Plains")
+    float PlainsHeight = 350.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Plains")
+    float PlainsFloorLevel = 15.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Plains", meta = (ClampMin = "1", ClampMax = "8"))
+    int32 PlainsOctaves = 2;
+
+    // --- NEW: 6. RIVERS ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Rivers")
+    float RiverNoiseScale = 0.0005f; // Frequency of river networks
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Rivers")
+    float RiverWidth = 0.025f; // How thick the river banks carve outward
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Rivers")
+    float RiverDepth = 400.0f; // How deep the river bed sits BELOW Sea Level (in World Units)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Rivers")
+    float RiverWarpScale = 0.002f; // Frequency of the distortion (how quickly it twists)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grassland|Rivers")
+    float RiverWarpStrength = 250.0f; // Distance rivers are violently pushed around
 };
 
 UCLASS()
@@ -186,7 +212,7 @@ public:
     int32 ChunkSize = 32;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    int32 FloorLevel = 40;
+    int32 FloorLevel = 0;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     int32 BedrockLevel = -64;

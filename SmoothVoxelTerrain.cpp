@@ -1153,12 +1153,11 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
     float BaseX = (float)WorldX + Seed;
     float BaseY = (float)WorldY + Seed;
 
+    // --- 1. Global Elevation ---
     float RawBaseNoise = FastValueNoise2D(BaseX * GrasslandBiome.GlobalBaseNoiseScale, BaseY * GrasslandBiome.GlobalBaseNoiseScale);
     float GlobalBaseNoise = (RawBaseNoise * 2.0f) - 1.0f;
 
-    float TotalHeight = (FloorLevel * CubeSize) + (GlobalBaseNoise * GrasslandBiome.GlobalBaseHeight);
-
-    // --- 2. Calculate Masks for Hills and Mountains ---
+    // --- 2. Calculate Masks for Hills, Mountains, and Plains ---
     float SmoothMaskVal = 0.0f;
     if (GrasslandBiome.SmoothHillLikelihood > 0.0f && GrasslandBiome.SmoothHillHeight > 0.0f)
     {
@@ -1183,9 +1182,26 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
         }
     }
 
-    // --- 3. Flat Fields Noise (Only applies where there are no hills) ---
-    // If we are in a hill or mountain (MaskVal > 0), the FlatWeight goes to 0, wiping out field bumps.
-    float FlatWeight = FMath::Clamp(1.0f - FMath::Max(SmoothMaskVal, JaggedMaskVal), 0.0f, 1.0f);
+    float PlainsMaskVal = 0.0f;
+    if (GrasslandBiome.PlainsLikelihood > 0.0f && GrasslandBiome.PlainsHeight > 0.0f)
+    {
+        float PlainsMask = FastValueNoise2D(BaseX * GrasslandBiome.PlainsMaskScale + 5432.1f, BaseY * GrasslandBiome.PlainsMaskScale + 5432.1f);
+        float PlainsThreshold = 1.0f - GrasslandBiome.PlainsLikelihood;
+        if (PlainsMask > PlainsThreshold)
+        {
+            PlainsMaskVal = (PlainsMask - PlainsThreshold) / GrasslandBiome.PlainsLikelihood;
+            PlainsMaskVal = PlainsMaskVal * PlainsMaskVal * (3.0f - 2.0f * PlainsMaskVal);
+        }
+    }
+
+    // Blend dynamically: Depending on the Plains mask, interpolate between the default FloorLevel and the Dedicated PlainsFloorLevel
+    float EffectiveFloorLevel = FMath::Lerp((float)FloorLevel, GrasslandBiome.PlainsFloorLevel, PlainsMaskVal);
+    float TotalHeight = (EffectiveFloorLevel * CubeSize) + (GlobalBaseNoise * GrasslandBiome.GlobalBaseHeight);
+
+    // --- 3. Flat Fields Noise (Only applies where there are no hills, mountains or plains) ---
+    // Wipe out the field bumps where any of the large dominant features override them.
+    float MaxDominantMask = FMath::Max(SmoothMaskVal, FMath::Max(JaggedMaskVal, PlainsMaskVal));
+    float FlatWeight = FMath::Clamp(1.0f - MaxDominantMask, 0.0f, 1.0f);
 
     if (FlatWeight > 0.0f && GrasslandBiome.FlatFieldHeight > 0.0f)
     {
@@ -1197,8 +1213,7 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
         for (int32 i = 0; i < GrasslandBiome.FlatFieldOctaves; ++i)
         {
             float N = FastValueNoise2D(BaseX * Freq + (i * 246.8f), BaseY * Freq + (i * 246.8f));
-            // Remap N to [-1, 1] before adding it
-            FieldNoise += ((N * 2.0f) - 1.0f) * Amp;
+            FieldNoise += ((N * 2.0f) - 1.0f) * Amp; // Remap N to [-1, 1]
 
             MaxAmp += Amp;
             Freq *= 2.2f;
@@ -1206,11 +1221,33 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
         }
         FieldNoise /= MaxAmp;
 
-        // Add field noise, scaled down by FlatWeight so it cleanly fades into the smooth base of hills
         TotalHeight += FieldNoise * GrasslandBiome.FlatFieldHeight * FlatWeight;
     }
 
-    // --- 4. Apply Smooth Big Hills ---
+    // --- 4. Apply Plains (Wide, Low-Noise Rolling Landscapes) ---
+    if (PlainsMaskVal > 0.0f)
+    {
+        float PlainsNoise = 0.0f;
+        float Freq = GrasslandBiome.PlainsNoiseScale;
+        float Amp = 1.0f;
+        float MaxAmp = 0.0f;
+
+        for (int32 i = 0; i < GrasslandBiome.PlainsOctaves; ++i)
+        {
+            float N = FastValueNoise2D(BaseX * Freq + 3456.9f + (i * 888.0f), BaseY * Freq + 3456.9f + (i * 888.0f));
+            N = N * N * (3.0f - 2.0f * N); // Add natural curvature smoothing
+
+            PlainsNoise += N * Amp;
+            MaxAmp += Amp;
+            Freq *= 2.0f; // Broaden octaves cleanly
+            Amp *= 0.5f;
+        }
+        PlainsNoise /= MaxAmp;
+
+        TotalHeight += PlainsNoise * GrasslandBiome.PlainsHeight * PlainsMaskVal;
+    }
+
+    // --- 5. Apply Smooth Big Hills ---
     if (SmoothMaskVal > 0.0f)
     {
         float HillNoise = 0.0f;
@@ -1221,7 +1258,7 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
         for (int32 i = 0; i < GrasslandBiome.SmoothHillOctaves; ++i)
         {
             float N = FastValueNoise2D(BaseX * Freq + 5678.9f + (i * 999.0f), BaseY * Freq + 5678.9f + (i * 999.0f));
-            N = N * N * (3.0f - 2.0f * N); // Smoothstep rounds the hills naturally
+            N = N * N * (3.0f - 2.0f * N);
 
             HillNoise += N * Amp;
             MaxAmp += Amp;
@@ -1236,7 +1273,7 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
         TotalHeight += HillNoise * CurrentHillMaxHeight * SmoothMaskVal;
     }
 
-    // --- 5. Apply Jagged Mountains ---
+    // --- 6. Apply Jagged Mountains ---
     if (JaggedMaskVal > 0.0f)
     {
         float JaggedNoise = 0.0f;
@@ -1259,6 +1296,33 @@ float ASmoothVoxelTerrain::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) co
         float CurrentJaggedMaxHeight = FMath::Max(0.0f, GrasslandBiome.JaggedHillHeight + (JVariance * GrasslandBiome.JaggedHillHeightVariance));
 
         TotalHeight += JaggedNoise * CurrentJaggedMaxHeight * JaggedMaskVal;
+    }
+
+
+    // --- 7. Apply Rivers (Carving down to below SeaLevel) ---
+    // Domain warping to make rivers meander organically
+    float WarpX = (FastValueNoise2D(BaseX * GrasslandBiome.RiverWarpScale, BaseY * GrasslandBiome.RiverWarpScale) * 2.0f - 1.0f) * GrasslandBiome.RiverWarpStrength;
+    float WarpY = (FastValueNoise2D(BaseX * GrasslandBiome.RiverWarpScale + 4321.1f, BaseY * GrasslandBiome.RiverWarpScale + 4321.1f) * 2.0f - 1.0f) * GrasslandBiome.RiverWarpStrength;
+
+    // Calculate absolute noise (creates a sharp valley line exactly where noise hits 0)
+    float RawRiverNoise = FastValueNoise2D((BaseX + WarpX) * GrasslandBiome.RiverNoiseScale + 9999.9f, (BaseY + WarpY) * GrasslandBiome.RiverNoiseScale + 9999.9f);
+    float RiverCenter = FMath::Abs(RawRiverNoise * 2.0f - 1.0f); // Range [0.0, 1.0]
+
+    // If we are close enough to the 0 line, start carving the trench
+    if (RiverCenter < GrasslandBiome.RiverWidth)
+    {
+        // Normalize mask: 1.0 is exact river center, 0.0 is the outer bank
+        float RiverMask = 1.0f - (RiverCenter / GrasslandBiome.RiverWidth);
+        RiverMask = RiverMask * RiverMask * (3.0f - 2.0f * RiverMask); // Smoothstep for natural curved banks
+
+        // Define how deep the river bottom should be
+        float TargetRiverBed = ((float)SeaLevel * CubeSize) - GrasslandBiome.RiverDepth;
+
+        // Pull the terrain height smoothly down towards the river bed
+        float CarvedHeight = FMath::Lerp(TotalHeight, TargetRiverBed, RiverMask);
+
+        // We use FMath::Min so rivers only *carve* into existing land, avoiding raising terrain up in deep oceans
+        TotalHeight = FMath::Min(TotalHeight, CarvedHeight);
     }
 
     return TotalHeight / CubeSize; // Gives us Absolute Altitude Voxels precisely scaling correctly
