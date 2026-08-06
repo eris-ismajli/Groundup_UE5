@@ -144,6 +144,15 @@ void ASmoothVoxelTerrain::Tick(float DeltaTime)
     Super::Tick(DeltaTime);
     if (bIsDestroyed) return;
 
+    if (TrackedPlayerComponent.IsValid())
+    {
+        FIntVector CurrentChunk = WorldToChunkCoord(TrackedPlayerComponent->GetComponentLocation());
+        if (CurrentChunk != LastPlayerChunkCoord)
+        {
+            HandleBoundaryCrossing(CurrentChunk);
+        }
+    }
+
     ProcessTasks();
     UpdateCollisionIfNeeded();
     UpdateChunkVisibilityAndShadows();
@@ -172,13 +181,7 @@ void ASmoothVoxelTerrain::RegisterPlayer(APawn* PlayerPawn)
 {
     if (PlayerPawn && PlayerPawn->GetRootComponent())
     {
-        if (TrackedPlayerComponent.IsValid())
-        {
-            TrackedPlayerComponent->TransformUpdated.RemoveAll(this);
-        }
-
         TrackedPlayerComponent = PlayerPawn->GetRootComponent();
-        TrackedPlayerComponent->TransformUpdated.AddUObject(this, &ASmoothVoxelTerrain::OnPlayerMoved);
 
         FIntVector InitialChunk = WorldToChunkCoord(TrackedPlayerComponent->GetComponentLocation());
         HandleBoundaryCrossing(InitialChunk);
@@ -338,11 +341,6 @@ void ASmoothVoxelTerrain::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     bIsDestroyed = true;
 
-    if (TrackedPlayerComponent.IsValid())
-    {
-        TrackedPlayerComponent->TransformUpdated.RemoveAll(this);
-    }
-
     for (auto& Pair : Chunks)
     {
         if (Pair.Value)
@@ -368,7 +366,6 @@ void ASmoothVoxelTerrain::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
     Super::EndPlay(EndPlayReason);
 }
-
 UDynamicMeshComponent* ASmoothVoxelTerrain::AcquireMeshComponent(int32 MeshType)
 {
     TArray<UDynamicMeshComponent*>* Pool = nullptr;
