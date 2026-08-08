@@ -686,6 +686,47 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                 }
             }
 
+            // Inside the GenerateChunkData Lambda:
+            for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
+                for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
+                    // Find the lowest corner to determine the solid ground foundation
+                    float MinCorner = FMath::Min3(
+                        (*LocalHeightMap)[(lx + 1) + (ly + 1) * CacheSize],
+                        (*LocalHeightMap)[(lx + 2) + (ly + 1) * CacheSize],
+                        FMath::Min((*LocalHeightMap)[(lx + 1) + (ly + 2) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 2) * CacheSize])
+                    );
+
+                    // GroundLevel is the top-most solid voxel. 
+                    // Subtracting BedrockLevel converts World-Z index to local Array-Z index.
+                    int32 GroundLevel = FMath::FloorToInt(MinCorner) - LocalBedrockLevel;
+
+                    // Final safety clamp for array indexing
+                    GroundLevel = FMath::Clamp(GroundLevel, 0, LocalMaxHeight - 1);
+
+                    int32 BaseIdx = lx + ly * LocalChunkSize, Step = LocalChunkSize * LocalChunkSize;
+                    for (int32 lz = 0; lz < LocalMaxHeight; ++lz) {
+                        int32 Index = BaseIdx + lz * Step;
+
+                        // If lz is 0, this is the layer immediately at BedrockLevel
+                        if (lz <= 0) {
+                            (*LocalVoxelData)[Index] = EVoxelType::Stone; // Bedrock is always solid
+                        }
+                        else if (lz < GroundLevel - 3) {
+                            (*LocalVoxelData)[Index] = EVoxelType::Stone;
+                        }
+                        else if (lz < GroundLevel) {
+                            (*LocalVoxelData)[Index] = EVoxelType::Dirt;
+                        }
+                        else if (lz == GroundLevel) {
+                            (*LocalVoxelData)[Index] = EVoxelType::Grass;
+                        }
+                        else {
+                            (*LocalVoxelData)[Index] = EVoxelType::Air;
+                        }
+                    }
+                }
+            }
+
             AsyncTask(ENamedThreads::GameThread, [WeakThis, ChunkCoord, LocalVoxelData, LocalHeightMap]()
                 {
                     ASmoothVoxelTerrain* Terrain = WeakThis.Get();
@@ -1067,7 +1108,22 @@ float FTerrainGenConfig::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) cons
         RiverMask = RiverMask * RiverMask * (3.0f - 2.0f * RiverMask);
         TotalHeight = FMath::Min(TotalHeight, FMath::Lerp(TotalHeight, ((float)SeaLevel * CubeSize) - GrasslandBiome.RiverDepth, RiverMask));
     }
-    return TotalHeight / CubeSize;
+
+    float FinalHeightVoxels = TotalHeight / CubeSize;
+
+    // 1. Enforce Floor Level: Surface cannot go below the defined FloorLevel
+    FinalHeightVoxels = FMath::Max(FinalHeightVoxels, (float)FloorLevel);
+
+    // 2. Enforce Bedrock Safety: Surface must be at least 1 unit above bedrock 
+    // to allow for dirt/grass voxel layers.
+    FinalHeightVoxels = FMath::Max(FinalHeightVoxels, (float)BedrockLevel + 1.0f);
+
+    // 3. Enforce Max Height: Ensure it doesn't exceed the allocated data array
+    // (MaxHeight is relative to BedrockLevel)
+    float MaxAbsoluteHeight = (float)(BedrockLevel + MaxHeight - 2);
+    FinalHeightVoxels = FMath::Min(FinalHeightVoxels, MaxAbsoluteHeight);
+
+    return FinalHeightVoxels;
 }
 
 float FTerrainGenConfig::GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const
