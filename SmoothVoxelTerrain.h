@@ -15,7 +15,6 @@ using FTriIDArray = TArray<int32, TInlineAllocator<64>>;
 
 struct FChunkNeighborhood;
 
-// Swapped FLocalHeightGrid to FLocalDensityGrid for 3D Volume Data
 struct FLocalDensityGrid
 {
     const float* Densities;
@@ -24,8 +23,10 @@ struct FLocalDensityGrid
 
     FORCEINLINE float GetDensity(int32 LocalX, int32 LocalY, int32 LocalZ) const
     {
-        // 3D Indexing with +1 offset for bounds padding cache
-        return Densities[(LocalX + 1) + (LocalY + 1) * CacheSizeXY + (LocalZ + 1) * CacheSizeXY * CacheSizeXY];
+        int32 SafeX = FMath::Clamp(LocalX + 1, 0, CacheSizeXY - 1);
+        int32 SafeY = FMath::Clamp(LocalY + 1, 0, CacheSizeXY - 1);
+        int32 SafeZ = FMath::Clamp(LocalZ + 1, 0, CacheSizeZ - 1);
+        return Densities[SafeX + SafeY * CacheSizeXY + SafeZ * CacheSizeXY * CacheSizeXY];
     }
 };
 
@@ -115,7 +116,6 @@ struct FBiomeGrasslandSettings
     float RiverWarpStrength = 250.0f;
 };
 
-// --- Totally stateless thread-safe generation configuration struct ---
 struct FTerrainGenConfig
 {
     int32 ChunkSize;
@@ -141,13 +141,19 @@ struct FTerrainGenConfig
     bool bTwoSidedGrass;
     float TextureScale;
 
-    // Modified from 2D Height methods to 3D Density methods
     float GetDensityAtWorldCoordinate(int32 WorldX, int32 WorldY, int32 WorldZ) const;
-    float GetInterpolatedDensityLocal(float LocalX, float LocalY, float LocalZ, const FLocalDensityGrid& DensityGrid) const;
+
+    // Core surface trackers perfectly mapping back to the 2D logic
+    float GetSurfaceZLocal(int32 VertX, int32 VertY, int32 DefaultVertZ, const FLocalDensityGrid& DensityGrid) const;
+    float GetInterpolatedSurfaceZLocal(float LocalX, float LocalY, int32 LocalZ, const FLocalDensityGrid& DensityGrid) const;
+
+    // Voxel-Ownership tracking is restored (VoxX, VoxY, VoxZ)
     FVector GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+
     FVector GetSmoothNormalLocal(int32 VertX, int32 VertY, int32 VertZ, const FLocalDensityGrid& DensityGrid) const;
     float GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalDensityGrid& DensityGrid) const;
     FLinearColor GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const;
+
     void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
     void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
 };
@@ -168,8 +174,6 @@ public:
         bool bWaterGenerated = false;
 
         TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> VoxelData;
-
-        // Replaced HeightMap with a robust 3D DensityField representation 
         TSharedPtr<TArray<float>, ESPMode::ThreadSafe> DensityField;
 
         TMap<int32, FTriIDArray> VoxelTriangles;
@@ -293,13 +297,13 @@ public:
     void RebuildTerrain();
 
     UFUNCTION(BlueprintCallable, Category = "Terrain")
-    void RemoveVoxel(FVector WorldLocation);
+    void RemoveVoxel(FVector WorldLocation, FVector HitNormal = FVector::ZeroVector);
 
     bool GetVoxelAtWorldPoint(const FVector& WorldPoint, int32& OutVoxelX, int32& OutVoxelY, int32& OutVoxelZ, EVoxelType* OutType = nullptr);
     EVoxelType GetVoxelAtWorld(int32 WorldX, int32 WorldY, int32 WorldZ) const;
 
     UFUNCTION(BlueprintCallable, Category = "Terrain")
-    void PlaceVoxel(FVector WorldLocation, EVoxelType Type = EVoxelType::Stone);
+    void PlaceVoxel(FVector WorldLocation, EVoxelType Type = EVoxelType::Stone, FVector HitNormal = FVector::ZeroVector);
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Collision")
     TEnumAsByte<ECollisionEnabled::Type> CollisionEnabled = ECollisionEnabled::QueryAndPhysics;
