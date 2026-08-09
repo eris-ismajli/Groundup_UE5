@@ -15,13 +15,17 @@ using FTriIDArray = TArray<int32, TInlineAllocator<64>>;
 
 struct FChunkNeighborhood;
 
-struct FLocalHeightGrid
+// Swapped FLocalHeightGrid to FLocalDensityGrid for 3D Volume Data
+struct FLocalDensityGrid
 {
-    const float* Heights;
-    int32 CacheSize;
-    FORCEINLINE float GetHeight(int32 LocalX, int32 LocalY) const
+    const float* Densities;
+    int32 CacheSizeXY;
+    int32 CacheSizeZ;
+
+    FORCEINLINE float GetDensity(int32 LocalX, int32 LocalY, int32 LocalZ) const
     {
-        return Heights[(LocalX + 1) + (LocalY + 1) * CacheSize];
+        // 3D Indexing with +1 offset for bounds padding cache
+        return Densities[(LocalX + 1) + (LocalY + 1) * CacheSizeXY + (LocalZ + 1) * CacheSizeXY * CacheSizeXY];
     }
 };
 
@@ -137,14 +141,15 @@ struct FTerrainGenConfig
     bool bTwoSidedGrass;
     float TextureScale;
 
-    float GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) const;
-    float GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const;
-    FVector GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
-    FVector GetSmoothNormalLocal(int32 VertX, int32 VertY, const FLocalHeightGrid& HeightGrid) const;
-    float GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalHeightGrid& HeightGrid) const;
+    // Modified from 2D Height methods to 3D Density methods
+    float GetDensityAtWorldCoordinate(int32 WorldX, int32 WorldY, int32 WorldZ) const;
+    float GetInterpolatedDensityLocal(float LocalX, float LocalY, float LocalZ, const FLocalDensityGrid& DensityGrid) const;
+    FVector GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+    FVector GetSmoothNormalLocal(int32 VertX, int32 VertY, int32 VertZ, const FLocalDensityGrid& DensityGrid) const;
+    float GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalDensityGrid& DensityGrid) const;
     FLinearColor GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const;
-    void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
-    void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+    void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+    void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
 };
 
 UCLASS()
@@ -163,7 +168,9 @@ public:
         bool bWaterGenerated = false;
 
         TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> VoxelData;
-        TSharedPtr<TArray<float>, ESPMode::ThreadSafe> HeightMap;
+
+        // Replaced HeightMap with a robust 3D DensityField representation 
+        TSharedPtr<TArray<float>, ESPMode::ThreadSafe> DensityField;
 
         TMap<int32, FTriIDArray> VoxelTriangles;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
