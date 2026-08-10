@@ -1134,6 +1134,7 @@ float FTerrainGenConfig::GetDensityAtWorldCoordinate(int32 WorldX, int32 WorldY,
     return FinalHeightVoxels - (float)WorldZ;
 }
 
+
 FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const
 {
     int32 WorldX = ChunkCoord.X * ChunkSize + VertX;
