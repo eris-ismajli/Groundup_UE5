@@ -1137,6 +1137,12 @@ float FTerrainGenConfig::GetDensityAtWorldCoordinate(int32 WorldX, int32 WorldY,
 
 FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const
 {
+    // Prevent unused parameter compiler warnings
+    (void)VoxX;
+    (void)VoxY;
+    (void)VoxZ;
+    (void)Neighborhood;
+
     int32 WorldX = ChunkCoord.X * ChunkSize + VertX;
     int32 WorldY = ChunkCoord.Y * ChunkSize + VertY;
     float FinalZ = (float)(VertZ + BedrockLevel);
@@ -1144,36 +1150,29 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
     if (!bSmoothTerrain) return FVector(WorldX, WorldY, FinalZ) * CubeSize;
 
     bool bHasSmoothSurface = false;
-    bool bForceRigid = false;
 
-    // Check the 4 voxel columns surrounding this vertex
+    // Instead of checking the current (editable) voxel types, we solely check the immutable
+    // DensityGrid to determine if this vertex belongs to the original smooth surface.
+    // This guarantees that adjacent natural terrain never pops or deforms when blocks are placed/removed.
     for (int32 dy = -1; dy <= 0; ++dy) {
         for (int32 dx = -1; dx <= 0; ++dx) {
             int32 CheckX = VertX + dx;
             int32 CheckY = VertY + dy;
 
-            EVoxelType TypeBelow = Neighborhood.GetVoxel(CheckX, CheckY, VertZ - 1);
-            EVoxelType TypeAbove = Neighborhood.GetVoxel(CheckX, CheckY, VertZ);
+            float DensityBelow = DensityGrid.GetDensity(CheckX, CheckY, VertZ - 1);
+            float DensityAbove = DensityGrid.GetDensity(CheckX, CheckY, VertZ);
 
-            // If Grass has Air above it, this vertex is part of the natural exposed terrain surface
-            if (TypeBelow == EVoxelType::Grass && TypeAbove == EVoxelType::Air) {
+            // If the original density field crossed from solid to air here, it is a permanent surface crossing
+            if (DensityBelow > 0.0f && DensityAbove <= 0.0f) {
                 bHasSmoothSurface = true;
-            }
-
-            // If Grass has a solid block above it, someone built on the grass. Force flat floor.
-            if (TypeBelow == EVoxelType::Grass && TypeAbove != EVoxelType::Air) {
-                bForceRigid = true;
-            }
-
-            // If an underground block is exposed from above (e.g., dug hole), keep it rigid.
-            if ((TypeBelow == EVoxelType::Dirt || TypeBelow == EVoxelType::Stone) && TypeAbove == EVoxelType::Air) {
-                bForceRigid = true;
+                break;
             }
         }
+        if (bHasSmoothSurface) break;
     }
 
-    // Apply smooth surface zero-crossing ONLY if it's natural surface and not forced rigid
-    if (bHasSmoothSurface && !bForceRigid) {
+    // Apply smooth surface zero-crossing ONLY if it lies on the natural generated surface
+    if (bHasSmoothSurface) {
         FinalZ = GetSurfaceZLocal(VertX, VertY, VertZ, DensityGrid);
     }
 
@@ -1230,6 +1229,34 @@ FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos
     return FLinearColor::White;
 }
 
+static bool CheckIfVoxelIsModified(int32 cx, int32 cy, int32 cz, const FChunkNeighborhood& Neighborhood, const FLocalDensityGrid& DensityGrid, int32 MaxHeight)
+{
+    EVoxelType type = Neighborhood.GetVoxel(cx, cy, cz);
+    if (cz < 0 || cz >= MaxHeight) return false;
+    if (cz == 0) return type != EVoxelType::Stone;
+
+    int32 CacheXY = DensityGrid.CacheSizeXY;
+    int32 CacheZ = DensityGrid.CacheSizeZ;
+    float den = DensityGrid.Densities[(cx + 1) + (cy + 1) * CacheXY + (cz + 1) * CacheXY * CacheXY];
+
+    if (den > 0.0f) {
+        float denUp1 = DensityGrid.Densities[(cx + 1) + (cy + 1) * CacheXY + (cz + 2) * CacheXY * CacheXY];
+        EVoxelType orig = EVoxelType::Stone;
+        if (denUp1 <= 0.0f) {
+            orig = EVoxelType::Grass;
+        }
+        else {
+            float denUp4 = -1.0f;
+            if (cz + 5 < CacheZ) {
+                denUp4 = DensityGrid.Densities[(cx + 1) + (cy + 1) * CacheXY + (cz + 5) * CacheXY * CacheXY];
+            }
+            if (denUp4 <= 0.0f) orig = EVoxelType::Dirt;
+        }
+        return type != orig;
+    }
+    return type != EVoxelType::Air;
+}
+
 void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const
 {
     FDynamicMeshAttributeSet* Attr = Mesh.Attributes();
@@ -1244,6 +1271,23 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
     int32 WorldY = ChunkCoord.Y * ChunkSize + ly;
     int32 WorldZ = lz + BedrockLevel;
 
+    bool bIsModified = CheckIfVoxelIsModified(lx, ly, lz, Neighborhood, DensityGrid, Neighborhood.MaxHeight);
+
+    auto NeedsFace = [&](int32 nx, int32 ny, int32 nz) -> bool {
+        EVoxelType nType = Neighborhood.GetVoxel(nx, ny, nz);
+        if (nType == EVoxelType::Air) return true;
+
+        if (bIsModified) {
+            // Cubic blocks draw their faces towards natural blocks, but not towards other cubic blocks.
+            bool nModified = CheckIfVoxelIsModified(nx, ny, nz, Neighborhood, DensityGrid, Neighborhood.MaxHeight);
+            return !nModified;
+        }
+        else {
+            // Natural blocks exclusively draw faces to Air. Cubic faces completely seal the boundary.
+            return false;
+        }
+        };
+
     FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)WorldZ * CubeSize), CurrentType);
     int32 cIdx = ColorOverlay->AppendElement(FVector4f(VoxelColor));
 
@@ -1252,14 +1296,14 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
     else if (CurrentType == EVoxelType::Dirt) { TopMatID = BottomMatID = SideMatID = 1; }
     else if (CurrentType == EVoxelType::Stone) { TopMatID = BottomMatID = SideMatID = 2; }
 
-    if (!bSmoothTerrain)
+    if (!bSmoothTerrain || bIsModified)
     {
-        bool bExposedTop = Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air;
-        bool bExposedBottom = Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air;
-        bool bExposedEast = Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air;
-        bool bExposedWest = Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air;
-        bool bExposedNorth = Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air;
-        bool bExposedSouth = Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air;
+        bool bExposedTop = NeedsFace(lx, ly, lz + 1);
+        bool bExposedBottom = NeedsFace(lx, ly, lz - 1);
+        bool bExposedEast = NeedsFace(lx + 1, ly, lz);
+        bool bExposedWest = NeedsFace(lx - 1, ly, lz);
+        bool bExposedNorth = NeedsFace(lx, ly + 1, lz);
+        bool bExposedSouth = NeedsFace(lx, ly - 1, lz);
 
         if (!bExposedTop && !bExposedBottom && !bExposedEast && !bExposedWest && !bExposedNorth && !bExposedSouth) return;
 
@@ -1348,7 +1392,7 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 }
             };
 
-        if (Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air)
+        if (NeedsFace(lx, ly, lz + 1))
         {
             FVector n00 = GetSmoothNormalLocal(lx, ly, lz + 1, DensityGrid);
             FVector n10 = GetSmoothNormalLocal(lx + 1, ly, lz + 1, DensityGrid);
@@ -1384,20 +1428,19 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             AddTopQuadSmooth(v001, v011, v111, v101, n00, n01, n11, n10, TopMatID);
         }
 
-
-        if (Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air)
+        if (NeedsFace(lx, ly, lz - 1))
             AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
 
-        if (Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air)
+        if (NeedsFace(lx + 1, ly, lz))
             AddQuadWorldSmooth(v100, v101, v111, v110, SideMatID, 1, 2);
 
-        if (Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air)
+        if (NeedsFace(lx - 1, ly, lz))
             AddQuadWorldSmooth(v010, v011, v001, v000, SideMatID, 1, 2);
 
-        if (Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air)
+        if (NeedsFace(lx, ly + 1, lz))
             AddQuadWorldSmooth(v110, v111, v011, v010, SideMatID, 0, 2);
 
-        if (Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air)
+        if (NeedsFace(lx, ly - 1, lz))
             AddQuadWorldSmooth(v000, v001, v101, v100, SideMatID, 0, 2);
     }
 }
@@ -1425,6 +1468,8 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
     float TargetDensity = FMath::Lerp((float)GrassMinDensity, (float)GrassMaxDensity, DensityNoise) + (Hash3D(WorldX, WorldY, 888) - 0.5f) * 3.0f;
     int32 Density = FMath::Clamp(FMath::RoundToInt(TargetDensity), 0, GrassMaxDensity + 2);
 
+    bool bIsModified = CheckIfVoxelIsModified(lx, ly, lz, Neighborhood, DensityGrid, Neighborhood.MaxHeight);
+
     for (int32 i = 0; i < Density; ++i)
     {
         FFastRandom FastRand((uint32)WorldX * 73856093U ^ (uint32)WorldY * 19349663U ^ (uint32)i * 83492791U);
@@ -1435,7 +1480,7 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
         float BladeLocalX = (float)lx + RandX, BladeLocalY = (float)ly + RandY, BladeWorldZ = 0.0f;
         FVector GroundNormal(0.f, 0.f, 1.f);
 
-        if (bSmoothTerrain) {
+        if (bSmoothTerrain && !bIsModified) {
             BladeWorldZ = GetInterpolatedSurfaceZLocal(BladeLocalX, BladeLocalY, lz + 1, DensityGrid) * CubeSize;
             GroundNormal = GetSmoothNormalLocal(FMath::RoundToInt(BladeLocalX), FMath::RoundToInt(BladeLocalY), lz + 1, DensityGrid);
         }
@@ -1701,3 +1746,4 @@ void ASmoothVoxelTerrain::PostEditChangeProperty(FPropertyChangedEvent& Property
     }
 }
 #endif
+

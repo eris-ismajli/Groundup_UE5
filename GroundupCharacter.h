@@ -64,8 +64,6 @@ protected:
 public:
 	AGroundupCharacter();
 
-
-
 protected:
 
 	/** Called from Input Actions for movement input */
@@ -110,6 +108,13 @@ protected:
 	/** Set up input action bindings */
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
 
+	/** Toggle visual debug drawing for voxel interactions */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Debug")
+	bool bShowVoxelDebug = false;
+
+	/** Duration (in seconds) that debug shapes remain visible */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Debug", meta = (EditCondition = "bShowVoxelDebug"))
+	float VoxelDebugLife = 3.0f;
 
 public:
 
@@ -118,5 +123,4 @@ public:
 
 	/** Returns first person camera component **/
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
-
 };

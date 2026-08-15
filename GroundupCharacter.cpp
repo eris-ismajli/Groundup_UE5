@@ -10,6 +10,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "SmoothVoxelTerrain.h"
 #include "Groundup.h"
+#include "DrawDebugHelpers.h"
+
 
 AGroundupCharacter::AGroundupCharacter()
 {
@@ -69,26 +71,79 @@ void AGroundupCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 }
 
 
-void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
+{
 	FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
+
+	// Debug visualization for placement
+	if (bShowVoxelDebug && GetWorld())
+	{
+		// Impact point and normal
+		DrawDebugSphere(GetWorld(), HitResult.ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
+		DrawDebugLine(GetWorld(), HitResult.ImpactPoint,
+			HitResult.ImpactPoint + HitResult.ImpactNormal * 80.0f,
+			FColor::Yellow, false, VoxelDebugLife, 0, 2.0f);
+
+		// Placement location
+		DrawDebugSphere(GetWorld(), PlaceLocation, 8.0f, 8, FColor::Orange, false, VoxelDebugLife);
+
+		// Try to find the voxel that will be placed
+		int32 VoxelX, VoxelY, VoxelZ;
+		EVoxelType VoxelType;
+		if (HitTerrain->GetVoxelAtWorldPoint(PlaceLocation, VoxelX, VoxelY, VoxelZ, &VoxelType))
+		{
+			FVector WorldMin = HitTerrain->GetActorTransform().TransformPosition(FVector(
+				VoxelX * HitTerrain->CubeSize,
+				VoxelY * HitTerrain->CubeSize,
+				VoxelZ * HitTerrain->CubeSize));
+
+			FVector WorldMax = HitTerrain->GetActorTransform().TransformPosition(FVector(
+				(VoxelX + 1) * HitTerrain->CubeSize,
+				(VoxelY + 1) * HitTerrain->CubeSize,
+				(VoxelZ + 1) * HitTerrain->CubeSize));
+
+			FVector BoxCenter = (WorldMin + WorldMax) * 0.5f;
+			FVector BoxExtent = (WorldMax - WorldMin) * 0.5f;
+
+			DrawDebugBox(GetWorld(), BoxCenter, BoxExtent, FColor::Green, false, VoxelDebugLife);
+			DrawDebugSphere(GetWorld(), BoxCenter, 10.0f, 8, FColor::Green, false, VoxelDebugLife);
+			DrawDebugString(GetWorld(), HitResult.ImpactPoint + FVector(0, 0, 30),
+				FString::Printf(TEXT("Place Voxel (%d, %d, %d)"), VoxelX, VoxelY, VoxelZ),
+				nullptr, FColor::White, VoxelDebugLife);
+		}
+	}
+
 	HitTerrain->PlaceVoxel(PlaceLocation);
 }
 
-void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
+{
+	const float CubeSize = HitTerrain->CubeSize;
+
 	// Nudge the impact point inward along the hit normal to avoid boundary ambiguity
-	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.01f;
+	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * CubeSize * 0.01f;
+
+	// Debug visualization for removal
+	if (bShowVoxelDebug && GetWorld())
+	{
+		DrawDebugSphere(GetWorld(), HitResult.ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
+		DrawDebugLine(GetWorld(), HitResult.ImpactPoint,
+			HitResult.ImpactPoint + HitResult.ImpactNormal * 80.0f,
+			FColor::Yellow, false, VoxelDebugLife, 0, 2.0f);
+		DrawDebugSphere(GetWorld(), AdjustedPoint, 8.0f, 8, FColor::Orange, false, VoxelDebugLife);
+	}
 
 	int32 VoxelX, VoxelY, VoxelZ;
 	EVoxelType VoxelType;
 
-	if (HitTerrain->GetVoxelAtWorldPoint(AdjustedPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
+	if (HitTerrain->GetVoxelAtWorldPoint(HitResult.ImpactPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
 	{
-		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f); // roughly upward
+		bool bAutoAssisted = false;
+		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f);
 
-		// Auto‑assist only when clicking the top face AND hitting air
+		// Auto-assist only when clicking the top face AND hitting air
 		if (bIsTopFace && VoxelType == EVoxelType::Air)
 		{
-			// Check the voxel directly below
 			int32 BelowX = VoxelX;
 			int32 BelowY = VoxelY;
 			int32 BelowZ = VoxelZ - 1;
@@ -100,10 +155,17 @@ void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHit
 				VoxelY = BelowY;
 				VoxelZ = BelowZ;
 				VoxelType = BelowType;
+				bAutoAssisted = true;
 			}
 			else
 			{
-				return; // nothing to break
+				if (bShowVoxelDebug && GetWorld())
+				{
+					DrawDebugString(GetWorld(), HitResult.ImpactPoint,
+						TEXT("Air below air - no break"),
+						nullptr, FColor::Magenta, VoxelDebugLife);
+				}
+				return;
 			}
 		}
 
@@ -111,11 +173,40 @@ void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHit
 		if (VoxelType != EVoxelType::Air)
 		{
 			FVector LocalCenter(
-				VoxelX * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
-				VoxelY * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
-				VoxelZ * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f
+				VoxelX * CubeSize + CubeSize * 0.5f,
+				VoxelY * CubeSize + CubeSize * 0.5f,
+				VoxelZ * CubeSize + CubeSize * 0.5f
 			);
 			FVector WorldCenter = HitTerrain->GetActorTransform().TransformPosition(LocalCenter);
+
+			// Debug visualization of the voxel being removed
+			if (bShowVoxelDebug && GetWorld())
+			{
+				FVector WorldMin = HitTerrain->GetActorTransform().TransformPosition(FVector(
+					VoxelX * CubeSize,
+					VoxelY * CubeSize,
+					VoxelZ * CubeSize));
+
+				FVector WorldMax = HitTerrain->GetActorTransform().TransformPosition(FVector(
+					(VoxelX + 1) * CubeSize,
+					(VoxelY + 1) * CubeSize,
+					(VoxelZ + 1) * CubeSize));
+
+				FVector BoxCenter = (WorldMin + WorldMax) * 0.5f;
+				FVector BoxExtent = (WorldMax - WorldMin) * 0.5f;
+
+				FColor BoxColor = bAutoAssisted ? FColor::Green : FColor::Cyan;
+
+				DrawDebugBox(GetWorld(), BoxCenter, BoxExtent, BoxColor, false, VoxelDebugLife);
+				DrawDebugSphere(GetWorld(), WorldCenter, 10.0f, 8, BoxColor, false, VoxelDebugLife);
+
+				DrawDebugString(GetWorld(), HitResult.ImpactPoint + FVector(0, 0, 30),
+					FString::Printf(TEXT("Break Voxel (%d, %d, %d) Type: %d%s"),
+						VoxelX, VoxelY, VoxelZ,
+						(int32)VoxelType,
+						bAutoAssisted ? TEXT(" (auto-assisted below)") : TEXT("")),
+					nullptr, FColor::White, VoxelDebugLife);
+			}
 
 			HitTerrain->RemoveVoxel(WorldCenter);
 		}
@@ -143,17 +234,17 @@ void AGroundupCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Ac
 		if (HitTerrain)
 		{
 			switch (Action) {
-				case EVoxelInteractionAction::Place:
-					ExecutePlaceVoxel(HitTerrain, HitResult);
-					break;
-				case EVoxelInteractionAction::Break:
-					ExecuteBreakVoxel(HitTerrain, HitResult);
-					break;
-				case EVoxelInteractionAction::Hover:
-					ExecuteHighlightVoxel(HitTerrain, HitResult);
-					break;
-				default:
-					UE_LOG(LogTemp, Error, TEXT("Undefined voxel interaction action."));
+			case EVoxelInteractionAction::Place:
+				ExecutePlaceVoxel(HitTerrain, HitResult);
+				break;
+			case EVoxelInteractionAction::Break:
+				ExecuteBreakVoxel(HitTerrain, HitResult);
+				break;
+			case EVoxelInteractionAction::Hover:
+				ExecuteHighlightVoxel(HitTerrain, HitResult);
+				break;
+			default:
+				UE_LOG(LogTemp, Error, TEXT("Undefined voxel interaction action."));
 			}
 		}
 	}
@@ -161,29 +252,22 @@ void AGroundupCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Ac
 
 void AGroundupCharacter::MoveInput(const FInputActionValue& Value)
 {
-	// get the Vector2D move axis
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
-	// pass the axis values to the move input
 	DoMove(MovementVector.X, MovementVector.Y);
-
 }
 
 void AGroundupCharacter::LookInput(const FInputActionValue& Value)
 {
-	// get the Vector2D look axis
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
 
-	// pass the axis values to the aim input
 	DoAim(LookAxisVector.X, LookAxisVector.Y);
-
 }
 
 void AGroundupCharacter::DoAim(float Yaw, float Pitch)
 {
 	if (GetController())
 	{
-		// pass the rotation inputs
 		AddControllerYawInput(Yaw);
 		AddControllerPitchInput(Pitch);
 	}
@@ -193,7 +277,6 @@ void AGroundupCharacter::DoMove(float Right, float Forward)
 {
 	if (GetController())
 	{
-		// pass the move inputs
 		AddMovementInput(GetActorRightVector(), Right);
 		AddMovementInput(GetActorForwardVector(), Forward);
 	}
@@ -201,16 +284,13 @@ void AGroundupCharacter::DoMove(float Right, float Forward)
 
 void AGroundupCharacter::DoJumpStart()
 {
-	// pass Jump to the character
 	Jump();
 }
 
 void AGroundupCharacter::DoJumpEnd()
 {
-	// pass StopJumping to the character
 	StopJumping();
 }
-
 
 void AGroundupCharacter::RemoveVoxel()
 {
