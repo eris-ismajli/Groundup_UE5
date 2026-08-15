@@ -1143,15 +1143,37 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
 
     if (!bSmoothTerrain) return FVector(WorldX, WorldY, FinalZ) * CubeSize;
 
-    // Rule 1: We only smooth a vertex if its generating Voxel is Grass, and it's the Top vertex
-    if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) == EVoxelType::Grass && VertZ > VoxZ) {
+    bool bHasSmoothSurface = false;
+    bool bForceRigid = false;
 
-        // Rule 2: If there's something built on top of it, don't smooth it! It must become a flat cubic floor.
-        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) != EVoxelType::Air) {
-            return FVector(WorldX, WorldY, FinalZ) * CubeSize;
+    // Check the 4 voxel columns surrounding this vertex
+    for (int32 dy = -1; dy <= 0; ++dy) {
+        for (int32 dx = -1; dx <= 0; ++dx) {
+            int32 CheckX = VertX + dx;
+            int32 CheckY = VertY + dy;
+
+            EVoxelType TypeBelow = Neighborhood.GetVoxel(CheckX, CheckY, VertZ - 1);
+            EVoxelType TypeAbove = Neighborhood.GetVoxel(CheckX, CheckY, VertZ);
+
+            // If Grass has Air above it, this vertex is part of the natural exposed terrain surface
+            if (TypeBelow == EVoxelType::Grass && TypeAbove == EVoxelType::Air) {
+                bHasSmoothSurface = true;
+            }
+
+            // If Grass has a solid block above it, someone built on the grass. Force flat floor.
+            if (TypeBelow == EVoxelType::Grass && TypeAbove != EVoxelType::Air) {
+                bForceRigid = true;
+            }
+
+            // If an underground block is exposed from above (e.g., dug hole), keep it rigid.
+            if ((TypeBelow == EVoxelType::Dirt || TypeBelow == EVoxelType::Stone) && TypeAbove == EVoxelType::Air) {
+                bForceRigid = true;
+            }
         }
+    }
 
-        // Apply smooth surface zero-crossing
+    // Apply smooth surface zero-crossing ONLY if it's natural surface and not forced rigid
+    if (bHasSmoothSurface && !bForceRigid) {
         FinalZ = GetSurfaceZLocal(VertX, VertY, VertZ, DensityGrid);
     }
 
@@ -1362,31 +1384,20 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             AddTopQuadSmooth(v001, v011, v111, v101, n00, n01, n11, n10, TopMatID);
         }
 
-        if (Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air) AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
 
-        const float ZOffsetEpsilon = 0.1f;
-        if (GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, DensityGrid) < v100.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v101, Neighborhood, DensityGrid) < v101.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v111, Neighborhood, DensityGrid) < v111.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v110, Neighborhood, DensityGrid) < v110.Z - ZOffsetEpsilon)
+        if (Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air)
+            AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
+
+        if (Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air)
             AddQuadWorldSmooth(v100, v101, v111, v110, SideMatID, 1, 2);
 
-        if (GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, DensityGrid) < v010.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v011, Neighborhood, DensityGrid) < v011.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v001, Neighborhood, DensityGrid) < v001.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v000, Neighborhood, DensityGrid) < v000.Z - ZOffsetEpsilon)
+        if (Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air)
             AddQuadWorldSmooth(v010, v011, v001, v000, SideMatID, 1, 2);
 
-        if (GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, DensityGrid) < v110.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v111, Neighborhood, DensityGrid) < v111.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v011, Neighborhood, DensityGrid) < v011.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v010, Neighborhood, DensityGrid) < v010.Z - ZOffsetEpsilon)
+        if (Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air)
             AddQuadWorldSmooth(v110, v111, v011, v010, SideMatID, 0, 2);
 
-        if (GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, DensityGrid) < v000.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v001, Neighborhood, DensityGrid) < v001.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v101, Neighborhood, DensityGrid) < v101.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v100, Neighborhood, DensityGrid) < v100.Z - ZOffsetEpsilon)
+        if (Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air)
             AddQuadWorldSmooth(v000, v001, v101, v100, SideMatID, 0, 2);
     }
 }
