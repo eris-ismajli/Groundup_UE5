@@ -21,7 +21,7 @@ static int32 FloorDiv(int32 Dividend, int32 Divisor)
 }
 
 // ---------------------------------------------------------------------------------
-// HASHING & PERLIN NOISE IMPLEMENTATION
+// HASHING & NOISE IMPLEMENTATION
 // ---------------------------------------------------------------------------------
 
 FORCEINLINE float Hash2D(int32 x, int32 y)
@@ -96,10 +96,6 @@ FORCEINLINE float FastPerlinNoise3D(float x, float y, float z)
         FMath::Lerp(FMath::Lerp(c001, c101, ux), FMath::Lerp(c011, c111, ux), uy), uz) * 1.414f;
 }
 
-// ---------------------------------------------------------------------------------
-// NOISE HELPERS
-// ---------------------------------------------------------------------------------
-
 float CalculateFBM2D(float x, float y, int32 octaves, float freq, float amp, int32 layerSeed)
 {
     float total = 0.0f; float maxAmp = 0.0f;
@@ -140,6 +136,28 @@ float CalculateRidgedFBM2D(float x, float y, int32 octaves, float freq, float am
         maxAmp += amp;
         freq *= 2.13f;
         amp *= 0.48f;
+    }
+    return maxAmp > 0.0f ? total / maxAmp : 0.0f;
+}
+
+float CalculateFBM3D(float x, float y, float z, int32 octaves, float freq, float amp, int32 layerSeed)
+{
+    float total = 0.0f;
+    float maxAmp = 0.0f;
+    for (int32 i = 0; i < octaves; ++i)
+    {
+        float offsetX = Hash3D(layerSeed, i, 11) * 3000.0f;
+        float offsetY = Hash3D(layerSeed + 1, i, 22) * 3000.0f;
+        float offsetZ = Hash3D(layerSeed + 2, i, 33) * 3000.0f;
+
+        float rx = (x * freq) + offsetX;
+        float ry = (y * freq) + offsetY;
+        float rz = (z * freq) + offsetZ;
+
+        total += FastPerlinNoise3D(rx, ry, rz) * amp;
+        maxAmp += amp;
+        freq *= 2.02f;
+        amp *= 0.5f;
     }
     return maxAmp > 0.0f ? total / maxAmp : 0.0f;
 }
@@ -193,6 +211,10 @@ struct FChunkNeighborhood
     }
 };
 
+// ---------------------------------------------------------------------------------
+// ACTOR IMPLEMENTATION
+// ---------------------------------------------------------------------------------
+
 ASmoothVoxelTerrain::ASmoothVoxelTerrain()
 {
     PrimaryActorTick.bCanEverTick = true;
@@ -201,7 +223,17 @@ ASmoothVoxelTerrain::ASmoothVoxelTerrain()
     RootComponent = RootSceneComponent;
 }
 
-ASmoothVoxelTerrain::~ASmoothVoxelTerrain() { bIsDestroyed = true; }
+ASmoothVoxelTerrain::~ASmoothVoxelTerrain()
+{
+    bIsDestroyed = true;
+}
+
+void ASmoothVoxelTerrain::BeginDestroy()
+{
+    bIsDestroyed = true;
+    CleanupAllComponents();
+    Super::BeginDestroy();
+}
 
 void ASmoothVoxelTerrain::OnConstruction(const FTransform& Transform)
 {
@@ -267,13 +299,14 @@ void ASmoothVoxelTerrain::RegisterPlayer(APawn* PlayerPawn)
 
 void ASmoothVoxelTerrain::OnPlayerMoved(USceneComponent* UpdatedComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport)
 {
-    if (!UpdatedComponent) return;
+    if (!UpdatedComponent || bIsDestroyed) return;
     FIntVector CurrentChunk = WorldToChunkCoord(UpdatedComponent->GetComponentLocation());
     if (CurrentChunk != LastPlayerChunkCoord) HandleBoundaryCrossing(CurrentChunk);
 }
 
 void ASmoothVoxelTerrain::HandleBoundaryCrossing(const FIntVector& NewChunkCoord)
 {
+    if (bIsDestroyed) return;
     LastPlayerChunkCoord = NewChunkCoord;
 
     DataGenerationQueue.Empty();
@@ -305,11 +338,11 @@ void ASmoothVoxelTerrain::HandleBoundaryCrossing(const FIntVector& NewChunkCoord
                 else
                 {
                     FVoxelChunk* Chunk = Chunks[Coord].Get();
-                    if (Chunk->State == EChunkState::DataReady && CheckNeighborsDataReady(Coord))
+                    if (Chunk && Chunk->State == EChunkState::DataReady && CheckNeighborsDataReady(Coord))
                     {
                         MeshGenerationQueue.Add(Coord);
                     }
-                    if (DistSq <= GrassRadiusSq)
+                    if (Chunk && DistSq <= GrassRadiusSq)
                     {
                         if (Chunk->State == EChunkState::MeshReady && !Chunk->bGrassGenerated && !Chunk->bGeneratingGrass)
                             GrassGenerationQueue.AddUnique(Coord);
@@ -326,15 +359,18 @@ void ASmoothVoxelTerrain::HandleBoundaryCrossing(const FIntVector& NewChunkCoord
                 if (Chunks.Contains(Coord))
                 {
                     FVoxelChunk* Chunk = Chunks[Coord].Get();
-                    if (Chunk->GrassMeshComponent)
+                    if (Chunk)
                     {
-                        ReleaseMeshComponent(Chunk->GrassMeshComponent, 1);
-                        Chunk->GrassMeshComponent = nullptr;
+                        if (Chunk->GrassMeshComponent.IsValid())
+                        {
+                            ReleaseMeshComponent(Chunk->GrassMeshComponent.Get(), 1);
+                            Chunk->GrassMeshComponent = nullptr;
+                        }
+                        Chunk->GrassVoxelTriangles.Empty();
+                        Chunk->bGrassGenerated = false;
+                        Chunk->bGeneratingGrass = false;
+                        GrassGenerationQueue.Remove(Coord);
                     }
-                    Chunk->GrassVoxelTriangles.Empty();
-                    Chunk->bGrassGenerated = false;
-                    Chunk->bGeneratingGrass = false;
-                    GrassGenerationQueue.Remove(Coord);
                 }
             }
         }
@@ -346,7 +382,7 @@ void ASmoothVoxelTerrain::HandleBoundaryCrossing(const FIntVector& NewChunkCoord
 
 void ASmoothVoxelTerrain::UpdateChunkVisibilityAndShadows()
 {
-    if (!TrackedPlayerComponent.IsValid()) return;
+    if (!TrackedPlayerComponent.IsValid() || bIsDestroyed) return;
     FVector PlayerLoc = TrackedPlayerComponent->GetComponentLocation();
     float GrassRadiusSq = FMath::Square(GrassRenderDistance * ChunkSize * CubeSize);
     float ShadowRadiusSq = FMath::Square(ShadowRenderDistance * ChunkSize * CubeSize);
@@ -361,13 +397,13 @@ void ASmoothVoxelTerrain::UpdateChunkVisibilityAndShadows()
         float ClosestY = FMath::Clamp(PlayerLoc.Y, ChunkOrigin.Y, ChunkOrigin.Y + (ChunkSize * CubeSize));
         float DistSq = FVector::DistSquaredXY(PlayerLoc, FVector(ClosestX, ClosestY, 0));
 
-        if (Chunk->GrassMeshComponent && Chunk->bGrassGenerated)
+        if (Chunk->GrassMeshComponent.IsValid() && Chunk->bGrassGenerated)
         {
             bool bShouldBeVisible = bEnableGrassGeometry && (DistSq <= GrassRadiusSq);
             if (Chunk->GrassMeshComponent->IsVisible() != bShouldBeVisible) Chunk->GrassMeshComponent->SetVisibility(bShouldBeVisible);
         }
 
-        if (Chunk->MeshComponent)
+        if (Chunk->MeshComponent.IsValid())
         {
             bool bShouldCastShadow = bCastShadow && (DistSq <= ShadowRadiusSq);
             if (Chunk->MeshComponent->CastShadow != bShouldCastShadow) Chunk->MeshComponent->SetCastShadow(bShouldCastShadow);
@@ -377,47 +413,81 @@ void ASmoothVoxelTerrain::UpdateChunkVisibilityAndShadows()
 
 void ASmoothVoxelTerrain::UpdateCollisionIfNeeded()
 {
-    if (bCollisionDirty)
+    if (bCollisionDirty && !bIsDestroyed)
     {
-        for (auto& Pair : Chunks) if (Pair.Value && Pair.Value->MeshComponent) Pair.Value->MeshComponent->UpdateCollision(false);
+        for (auto& Pair : Chunks)
+        {
+            if (Pair.Value && Pair.Value->MeshComponent.IsValid())
+            {
+                Pair.Value->MeshComponent->UpdateCollision(false);
+            }
+        }
         bCollisionDirty = false;
     }
+}
+
+void ASmoothVoxelTerrain::CleanupAllComponents()
+{
+    for (TObjectPtr<UDynamicMeshComponent>& Comp : ActiveComponents)
+    {
+        if (IsValid(Comp))
+        {
+            Comp->UnregisterComponent();
+            Comp->DestroyComponent();
+        }
+    }
+    ActiveComponents.Empty();
+    MeshComponentPool.Empty();
+    GrassMeshComponentPool.Empty();
+    WaterMeshComponentPool.Empty();
+    Chunks.Empty();
 }
 
 void ASmoothVoxelTerrain::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     bIsDestroyed = true;
-    Chunks.Empty();
-    MeshComponentPool.Empty();
-    GrassMeshComponentPool.Empty();
-    WaterMeshComponentPool.Empty();
+    GenerationEpoch++;
+
     DataGenerationQueue.Empty();
     MeshGenerationQueue.Empty();
     GrassGenerationQueue.Empty();
     MeshApplyQueue.Empty();
     GrassApplyQueue.Empty();
+
+    CleanupAllComponents();
     Super::EndPlay(EndPlayReason);
 }
 
 UDynamicMeshComponent* ASmoothVoxelTerrain::AcquireMeshComponent(int32 MeshType)
 {
-    TArray<UDynamicMeshComponent*>* Pool = nullptr;
+    if (bIsDestroyed) return nullptr;
+
+    TArray<TObjectPtr<UDynamicMeshComponent>>* Pool = nullptr;
     if (MeshType == 1) Pool = &GrassMeshComponentPool;
     else if (MeshType == 2) Pool = &WaterMeshComponentPool;
     else Pool = &MeshComponentPool;
 
-    if (Pool->Num() > 0)
+    while (Pool->Num() > 0)
     {
         UDynamicMeshComponent* Comp = Pool->Pop();
-        if (MeshType != 1) Comp->SetVisibility(true);
-        return Comp;
+        if (IsValid(Comp))
+        {
+            Comp->SetVisibility(true);
+            return Comp;
+        }
     }
 
     UDynamicMeshComponent* Comp = NewObject<UDynamicMeshComponent>(this);
+    if (!Comp) return nullptr;
+
     Comp->CreationMethod = EComponentCreationMethod::Instance;
     Comp->SetupAttachment(RootSceneComponent);
     Comp->SetMobility(EComponentMobility::Static);
     Comp->RegisterComponent();
+
+    // Synchronous cooking to prevent Chaos background thread races
+    Comp->bUseAsyncCooking = false;
+    Comp->bDeferCollisionUpdates = false;
 
     if (MeshType == 1) {
         Comp->SetCastShadow(false); Comp->SetReceivesDecals(false);
@@ -440,13 +510,14 @@ UDynamicMeshComponent* ASmoothVoxelTerrain::AcquireMeshComponent(int32 MeshType)
         Comp->EnableComplexAsSimpleCollision(); Comp->bEnableComplexCollision = bEnableComplexCollision;
         Comp->SetCollisionEnabled(CollisionEnabled); Comp->SetCollisionProfileName(CollisionProfileName);
         Comp->SetGenerateOverlapEvents(bGenerateOverlapEvents);
-        Comp->bUseAsyncCooking = true; Comp->bDeferCollisionUpdates = true;
 
         if (GrassMaterial) Comp->SetMaterial(0, GrassMaterial);
         if (DirtMaterial) Comp->SetMaterial(1, DirtMaterial);
         if (StoneMaterial) Comp->SetMaterial(2, StoneMaterial);
         if (SurfaceMaterial) Comp->SetMaterial(3, SurfaceMaterial);
     }
+
+    ActiveComponents.Add(Comp);
     return Comp;
 }
 
@@ -455,7 +526,10 @@ void ASmoothVoxelTerrain::ReleaseMeshComponent(UDynamicMeshComponent* Comp, int3
     if (Comp && IsValid(Comp))
     {
         Comp->SetVisibility(false);
-        if (UDynamicMesh* DynMesh = Comp->GetDynamicMesh()) DynMesh->EditMesh([](FDynamicMesh3& MeshOut) { MeshOut.Clear(); });
+        if (UDynamicMesh* DynMesh = Comp->GetDynamicMesh())
+        {
+            DynMesh->EditMesh([](FDynamicMesh3& MeshOut) { MeshOut.Clear(); });
+        }
         if (MeshType == 1) GrassMeshComponentPool.Add(Comp);
         else if (MeshType == 2) WaterMeshComponentPool.Add(Comp);
         else MeshComponentPool.Add(Comp);
@@ -464,13 +538,14 @@ void ASmoothVoxelTerrain::ReleaseMeshComponent(UDynamicMeshComponent* Comp, int3
 
 void ASmoothVoxelTerrain::GenerateChunks()
 {
+    GenerationEpoch++;
     for (auto& Pair : Chunks)
     {
         if (Pair.Value)
         {
-            if (Pair.Value->MeshComponent) ReleaseMeshComponent(Pair.Value->MeshComponent, 0);
-            if (Pair.Value->GrassMeshComponent) ReleaseMeshComponent(Pair.Value->GrassMeshComponent, 1);
-            if (Pair.Value->WaterMeshComponent) ReleaseMeshComponent(Pair.Value->WaterMeshComponent, 2);
+            if (Pair.Value->MeshComponent.IsValid()) ReleaseMeshComponent(Pair.Value->MeshComponent.Get(), 0);
+            if (Pair.Value->GrassMeshComponent.IsValid()) ReleaseMeshComponent(Pair.Value->GrassMeshComponent.Get(), 1);
+            if (Pair.Value->WaterMeshComponent.IsValid()) ReleaseMeshComponent(Pair.Value->WaterMeshComponent.Get(), 2);
         }
     }
     Chunks.Empty();
@@ -485,22 +560,29 @@ void ASmoothVoxelTerrain::GenerateChunks()
 
 void ASmoothVoxelTerrain::ProcessTasks()
 {
+    if (bIsDestroyed) return;
+
     int32 AppliedCount = 0;
     while (MeshApplyQueue.Num() > 0 && AppliedCount < MaxMeshApplyPerFrame)
     {
         auto Task = MeshApplyQueue[0];
         MeshApplyQueue.RemoveAt(0);
 
+        if (!Task.IsValid() || Task->Epoch != GenerationEpoch) continue;
+
         if (FVoxelChunk* Chunk = GetChunk(Task->Coord))
         {
             if (Chunk->State == EChunkState::GeneratingMesh)
             {
                 Chunk->State = EChunkState::MeshReady;
-                if (!Chunk->MeshComponent) Chunk->MeshComponent = AcquireMeshComponent(0);
+                if (!Chunk->MeshComponent.IsValid()) Chunk->MeshComponent = AcquireMeshComponent(0);
 
-                Chunk->VoxelTriangles = MoveTemp(Task->VoxelTriangles);
-                Chunk->MeshComponent->SetMesh(MoveTemp(Task->LocalMesh));
-                Chunk->MeshComponent->UpdateCollision(true);
+                if (Chunk->MeshComponent.IsValid())
+                {
+                    Chunk->VoxelTriangles = MoveTemp(Task->VoxelTriangles);
+                    Chunk->MeshComponent->SetMesh(MoveTemp(Task->LocalMesh));
+                    Chunk->MeshComponent->UpdateCollision(true);
+                }
 
                 if (bEnableWater && !Chunk->bWaterGenerated)
                 {
@@ -527,42 +609,44 @@ void ASmoothVoxelTerrain::ProcessTasks()
                     if (bNeedsWater)
                     {
                         Chunk->bWaterGenerated = true;
-                        if (!Chunk->WaterMeshComponent) Chunk->WaterMeshComponent = AcquireMeshComponent(2);
+                        if (!Chunk->WaterMeshComponent.IsValid()) Chunk->WaterMeshComponent = AcquireMeshComponent(2);
 
-                        FDynamicMesh3 WaterMesh;
-                        WaterMesh.EnableAttributes();
-                        FDynamicMeshAttributeSet* Attr = WaterMesh.Attributes();
-                        Attr->SetNumUVLayers(1); Attr->EnablePrimaryColors();
+                        if (Chunk->WaterMeshComponent.IsValid())
+                        {
+                            FDynamicMesh3 WaterMesh;
+                            WaterMesh.EnableAttributes();
+                            FDynamicMeshAttributeSet* Attr = WaterMesh.Attributes();
+                            Attr->SetNumUVLayers(1); Attr->EnablePrimaryColors();
 
-                        double WorldX = (double)Chunk->Coord.X * ChunkSize * CubeSize;
-                        double WorldY = (double)Chunk->Coord.Y * ChunkSize * CubeSize;
-                        double Z = (double)SeaLevel * CubeSize;
-                        double CSize = (double)ChunkSize * CubeSize;
+                            double WorldX = (double)Chunk->Coord.X * ChunkSize * CubeSize;
+                            double WorldY = (double)Chunk->Coord.Y * ChunkSize * CubeSize;
+                            double Z = (double)SeaLevel * CubeSize;
+                            double CSize = (double)ChunkSize * CubeSize;
 
-                        int32 v0 = WaterMesh.AppendVertex(FVector3d(WorldX, WorldY, Z)), v1 = WaterMesh.AppendVertex(FVector3d(WorldX + CSize, WorldY, Z));
-                        int32 v2 = WaterMesh.AppendVertex(FVector3d(WorldX + CSize, WorldY + CSize, Z)), v3 = WaterMesh.AppendVertex(FVector3d(WorldX, WorldY + CSize, Z));
+                            int32 v0 = WaterMesh.AppendVertex(FVector3d(WorldX, WorldY, Z)), v1 = WaterMesh.AppendVertex(FVector3d(WorldX + CSize, WorldY, Z));
+                            int32 v2 = WaterMesh.AppendVertex(FVector3d(WorldX + CSize, WorldY + CSize, Z)), v3 = WaterMesh.AppendVertex(FVector3d(WorldX, WorldY + CSize, Z));
 
-                        // CCW winding to make water face upwards correctly
-                        int32 t1 = WaterMesh.AppendTriangle(v0, v1, v2), t2 = WaterMesh.AppendTriangle(v0, v2, v3);
+                            int32 t1 = WaterMesh.AppendTriangle(v0, v1, v2), t2 = WaterMesh.AppendTriangle(v0, v2, v3);
 
-                        float UMin = ((float)Chunk->Coord.X * ChunkSize) * TextureScale, VMin = ((float)Chunk->Coord.Y * ChunkSize) * TextureScale;
-                        float UMax = ((float)(Chunk->Coord.X + 1) * ChunkSize) * TextureScale, VMax = ((float)(Chunk->Coord.Y + 1) * ChunkSize) * TextureScale;
+                            float UMin = ((float)Chunk->Coord.X * ChunkSize) * TextureScale, VMin = ((float)Chunk->Coord.Y * ChunkSize) * TextureScale;
+                            float UMax = ((float)(Chunk->Coord.X + 1) * ChunkSize) * TextureScale, VMax = ((float)(Chunk->Coord.Y + 1) * ChunkSize) * TextureScale;
 
-                        FDynamicMeshUVOverlay* UVs = Attr->GetUVLayer(0);
-                        int32 uv00 = UVs->AppendElement(FVector2f(UMin, VMin)), uv10 = UVs->AppendElement(FVector2f(UMax, VMin));
-                        int32 uv11 = UVs->AppendElement(FVector2f(UMax, VMax)), uv01 = UVs->AppendElement(FVector2f(UMin, VMax));
-                        UVs->SetTriangle(t1, FIndex3i(uv00, uv10, uv11)); UVs->SetTriangle(t2, FIndex3i(uv00, uv11, uv01));
+                            FDynamicMeshUVOverlay* UVs = Attr->GetUVLayer(0);
+                            int32 uv00 = UVs->AppendElement(FVector2f(UMin, VMin)), uv10 = UVs->AppendElement(FVector2f(UMax, VMin));
+                            int32 uv11 = UVs->AppendElement(FVector2f(UMax, VMax)), uv01 = UVs->AppendElement(FVector2f(UMin, VMax));
+                            UVs->SetTriangle(t1, FIndex3i(uv00, uv10, uv11)); UVs->SetTriangle(t2, FIndex3i(uv00, uv11, uv01));
 
-                        FDynamicMeshColorOverlay* Colors = Attr->PrimaryColors();
-                        int32 c0 = Colors->AppendElement(FVector4f(0.0f, 0.4f, 0.8f, 0.7f));
-                        Colors->SetTriangle(t1, FIndex3i(c0, c0, c0)); Colors->SetTriangle(t2, FIndex3i(c0, c0, c0));
+                            FDynamicMeshColorOverlay* Colors = Attr->PrimaryColors();
+                            int32 c0 = Colors->AppendElement(FVector4f(0.0f, 0.4f, 0.8f, 0.7f));
+                            Colors->SetTriangle(t1, FIndex3i(c0, c0, c0)); Colors->SetTriangle(t2, FIndex3i(c0, c0, c0));
 
-                        FDynamicMeshNormalOverlay* Normals = Attr->PrimaryNormals();
-                        int32 n0 = Normals->AppendElement(FVector3f(0.0f, 0.0f, 1.0f));
-                        Normals->SetTriangle(t1, FIndex3i(n0, n0, n0)); Normals->SetTriangle(t2, FIndex3i(n0, n0, n0));
+                            FDynamicMeshNormalOverlay* Normals = Attr->PrimaryNormals();
+                            int32 n0 = Normals->AppendElement(FVector3f(0.0f, 0.0f, 1.0f));
+                            Normals->SetTriangle(t1, FIndex3i(n0, n0, n0)); Normals->SetTriangle(t2, FIndex3i(n0, n0, n0));
 
-                        FMeshNormals::QuickComputeVertexNormals(WaterMesh); // Guarantee valid base normals
-                        Chunk->WaterMeshComponent->SetMesh(MoveTemp(WaterMesh));
+                            FMeshNormals::QuickComputeVertexNormals(WaterMesh);
+                            Chunk->WaterMeshComponent->SetMesh(MoveTemp(WaterMesh));
+                        }
                     }
                 }
 
@@ -580,14 +664,20 @@ void ASmoothVoxelTerrain::ProcessTasks()
         auto Task = GrassApplyQueue[0];
         GrassApplyQueue.RemoveAt(0);
 
+        if (!Task.IsValid() || Task->Epoch != GenerationEpoch) continue;
+
         if (FVoxelChunk* Chunk = GetChunk(Task->Coord))
         {
             if (Chunk->bGeneratingGrass && (FMath::Square(Task->Coord.X - LastPlayerChunkCoord.X) + FMath::Square(Task->Coord.Y - LastPlayerChunkCoord.Y)) <= FMath::Square(FMath::Min(GrassRenderDistance + 1, RenderDistance)))
             {
                 Chunk->bGeneratingGrass = false; Chunk->bGrassGenerated = true;
-                if (!Chunk->GrassMeshComponent) Chunk->GrassMeshComponent = AcquireMeshComponent(1);
-                Chunk->GrassVoxelTriangles = MoveTemp(Task->GrassVoxelTriangles);
-                Chunk->GrassMeshComponent->SetMesh(MoveTemp(Task->LocalGrassMesh));
+                if (!Chunk->GrassMeshComponent.IsValid()) Chunk->GrassMeshComponent = AcquireMeshComponent(1);
+
+                if (Chunk->GrassMeshComponent.IsValid())
+                {
+                    Chunk->GrassVoxelTriangles = MoveTemp(Task->GrassVoxelTriangles);
+                    Chunk->GrassMeshComponent->SetMesh(MoveTemp(Task->LocalGrassMesh));
+                }
             }
             else { Chunk->bGeneratingGrass = false; Chunk->bGrassGenerated = false; }
         }
@@ -643,7 +733,9 @@ FTerrainGenConfig ASmoothVoxelTerrain::GetTerrainConfig() const
     Config.ChunkSize = ChunkSize; Config.FloorLevel = FloorLevel; Config.BedrockLevel = BedrockLevel;
     Config.MaxHeight = MaxHeight; Config.CubeSize = CubeSize; Config.MinGrassThickness = MinGrassThickness;
     Config.Seed = Seed; Config.bEnableWater = bEnableWater;
-    Config.SeaLevel = SeaLevel; Config.GrasslandBiome = GrasslandBiome; Config.bEnableGrassGeometry = bEnableGrassGeometry;
+    Config.SeaLevel = SeaLevel; Config.GrasslandBiome = GrasslandBiome;
+    Config.CaveSettings = CaveSettings;
+    Config.bEnableGrassGeometry = bEnableGrassGeometry;
     Config.GrassMinDensity = GrassMinDensity; Config.GrassMaxDensity = GrassMaxDensity;
     Config.GrassMinHeight = GrassMinHeight; Config.GrassMaxHeight = GrassMaxHeight;
     Config.GrassMinWidth = GrassMinWidth; Config.GrassMaxWidth = GrassMaxWidth;
@@ -661,8 +753,9 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
 
     FTerrainGenConfig Config = GetTerrainConfig();
     TWeakObjectPtr<ASmoothVoxelTerrain> WeakThis(this);
+    uint32 TaskEpoch = GenerationEpoch;
 
-    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config]() mutable
+    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, TaskEpoch]() mutable
         {
             int32 LocalChunkSize = Config.ChunkSize, LocalMaxHeight = Config.MaxHeight, LocalBedrockLevel = Config.BedrockLevel;
 
@@ -672,15 +765,18 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
             int32 StepY = LocalChunkSize;
             int32 StepZ = LocalChunkSize * LocalChunkSize;
 
-            // 1. Generate Core Voxel Structure
-            for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
-                for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
+            TArray<float> ColumnHeights;
+            ColumnHeights.SetNumUninitialized(LocalChunkSize * LocalChunkSize);
 
+            // 1. Generate Base Terrain Heights & Initial Core Voxels
+            for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
+                for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
                     int32 WorldX = ChunkCoord.X * LocalChunkSize + lx;
                     int32 WorldY = ChunkCoord.Y * LocalChunkSize + ly;
+                    float Height = Config.GetTerrainHeight(WorldX, WorldY);
+                    ColumnHeights[lx + ly * StepY] = Height;
 
-                    int32 IntHeight = FMath::FloorToInt(Config.GetTerrainHeight(WorldX, WorldY));
-
+                    int32 IntHeight = FMath::FloorToInt(Height);
                     int32 BaseIdx = lx + ly * StepY;
 
                     for (int32 lz = 0; lz < LocalMaxHeight; ++lz) {
@@ -688,7 +784,7 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                         int32 WorldZ = lz + LocalBedrockLevel;
 
                         if (lz <= 0) {
-                            (*LocalVoxelData)[Index] = EVoxelType::Stone; // Bedrock is always solid
+                            (*LocalVoxelData)[Index] = EVoxelType::Stone; // Bedrock
                         }
                         else if (WorldZ <= IntHeight) {
                             if (WorldZ == IntHeight) {
@@ -708,17 +804,65 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                 }
             }
 
-            // 2. Clothed Voxels - Surface Layer Placement
+            // 2. Carve Caves (Tunnels & Caverns)
+            if (Config.CaveSettings.bEnableCaves)
+            {
+                for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
+                    for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
+                        int32 WorldX = ChunkCoord.X * LocalChunkSize + lx;
+                        int32 WorldY = ChunkCoord.Y * LocalChunkSize + ly;
+                        float SurfaceHeight = ColumnHeights[lx + ly * StepY];
+                        int32 BaseIdx = lx + ly * StepY;
+
+                        for (int32 lz = 1; lz < LocalMaxHeight; ++lz) {
+                            int32 Index = BaseIdx + lz * StepZ;
+                            if ((*LocalVoxelData)[Index] == EVoxelType::Air) continue;
+
+                            int32 WorldZ = lz + LocalBedrockLevel;
+                            if (Config.IsInsideCave(WorldX, WorldY, WorldZ, SurfaceHeight))
+                            {
+                                (*LocalVoxelData)[Index] = EVoxelType::Air;
+                            }
+                        }
+                    }
+                }
+
+                // Surface pass on newly exposed terrain in cave openings
+                for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
+                    for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
+                        int32 BaseIdx = lx + ly * StepY;
+                        for (int32 lz = LocalMaxHeight - 2; lz >= 1; --lz) {
+                            int32 Index = BaseIdx + lz * StepZ;
+                            int32 AboveIndex = Index + StepZ;
+
+                            if ((*LocalVoxelData)[Index] == EVoxelType::Stone && (*LocalVoxelData)[AboveIndex] == EVoxelType::Air)
+                            {
+                                int32 WorldZ = lz + LocalBedrockLevel;
+                                float SurfHeight = ColumnHeights[lx + ly * StepY];
+                                if (FMath::Abs(WorldZ - SurfHeight) <= 3.0f)
+                                {
+                                    (*LocalVoxelData)[Index] = EVoxelType::Grass;
+                                    for (int32 d = 1; d <= 2 && (lz - d) > 0; ++d) {
+                                        int32 BelowIdx = BaseIdx + (lz - d) * StepZ;
+                                        if ((*LocalVoxelData)[BelowIdx] == EVoxelType::Stone)
+                                            (*LocalVoxelData)[BelowIdx] = EVoxelType::Dirt;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Clothed Voxels - Surface Layer Placement (for chunk & caves)
             TSet<int32> SurfaceCandidates;
 
-            // We iterate over the chunk + 1 padding to catch Core voxels on chunk boundaries.
             for (int32 lz = 0; lz < LocalMaxHeight; ++lz) {
                 for (int32 ly = -1; ly <= LocalChunkSize; ++ly) {
                     for (int32 lx = -1; lx <= LocalChunkSize; ++lx) {
-
-                        // Check if the current voxel is a Core voxel. If it's outside chunk bounds,
-                        // evaluate the 2D heightmap to determine if it acts as a Core voxel dynamically.
                         bool bIsCore = false;
+
                         if (lx >= 0 && lx < LocalChunkSize && ly >= 0 && ly < LocalChunkSize) {
                             bIsCore = (*LocalVoxelData)[lx + ly * StepY + lz * StepZ] != EVoxelType::Air;
                         }
@@ -726,11 +870,17 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                             int32 WorldX = ChunkCoord.X * LocalChunkSize + lx;
                             int32 WorldY = ChunkCoord.Y * LocalChunkSize + ly;
                             int32 WorldZ = lz + LocalBedrockLevel;
-                            int32 IntHeight = FMath::FloorToInt(Config.GetTerrainHeight(WorldX, WorldY));
+                            float Height = Config.GetTerrainHeight(WorldX, WorldY);
+                            int32 IntHeight = FMath::FloorToInt(Height);
+
                             bIsCore = (lz <= 0) || (WorldZ <= IntHeight);
+                            if (bIsCore && lz > 0 && Config.CaveSettings.bEnableCaves) {
+                                if (Config.IsInsideCave(WorldX, WorldY, WorldZ, Height)) {
+                                    bIsCore = false;
+                                }
+                            }
                         }
 
-                        // If it is a Core block, any Air blocks directly connected to its 6 faces become Surface Candidates
                         if (bIsCore) {
                             int32 Neighbors[6][3] = {
                                 {lx + 1, ly, lz}, {lx - 1, ly, lz},
@@ -743,7 +893,6 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                                 int32 ny = Neighbors[i][1];
                                 int32 nz = Neighbors[i][2];
 
-                                // Only process the neighboring block if it falls strictly inside THIS chunk
                                 if (nx >= 0 && nx < LocalChunkSize && ny >= 0 && ny < LocalChunkSize && nz >= 0 && nz < LocalMaxHeight) {
                                     int32 NIndex = nx + ny * StepY + nz * StepZ;
                                     if ((*LocalVoxelData)[NIndex] == EVoxelType::Air) {
@@ -756,15 +905,15 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                 }
             }
 
-            // Apply surface blocks inside chunk limits
             for (int32 CandidateIndex : SurfaceCandidates) {
                 (*LocalVoxelData)[CandidateIndex] = EVoxelType::Surface;
             }
 
-            AsyncTask(ENamedThreads::GameThread, [WeakThis, ChunkCoord, LocalVoxelData]()
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, ChunkCoord, LocalVoxelData, TaskEpoch]()
                 {
                     ASmoothVoxelTerrain* Terrain = WeakThis.Get();
-                    if (!Terrain || Terrain->bIsDestroyed) return;
+                    if (!Terrain || Terrain->bIsDestroyed || Terrain->GenerationEpoch != TaskEpoch) return;
+
                     if (FVoxelChunk* TargetChunk = Terrain->GetChunk(ChunkCoord)) {
                         TargetChunk->VoxelData = LocalVoxelData; TargetChunk->State = EChunkState::DataReady;
                         if (Terrain->CheckNeighborsDataReady(ChunkCoord)) Terrain->MeshGenerationQueue.AddUnique(ChunkCoord);
@@ -794,10 +943,12 @@ void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
 
     FTerrainGenConfig Config = GetTerrainConfig();
     TWeakObjectPtr<ASmoothVoxelTerrain> WeakThis(this);
+    uint32 TaskEpoch = GenerationEpoch;
 
-    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, SelfData, WestData, EastData, SouthData, NorthData]() mutable
+    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, SelfData, WestData, EastData, SouthData, NorthData, TaskEpoch]() mutable
         {
             TSharedPtr<FMeshApplyTask, ESPMode::ThreadSafe> ResultTask = MakeShared<FMeshApplyTask, ESPMode::ThreadSafe>();
+            ResultTask->Epoch = TaskEpoch;
             ResultTask->Coord = ChunkCoord;
             ResultTask->LocalMesh.EnableAttributes();
             if (FDynamicMeshAttributeSet* Attr = ResultTask->LocalMesh.Attributes()) { Attr->SetNumUVLayers(2); Attr->EnablePrimaryColors(); Attr->EnableMaterialID(); }
@@ -823,11 +974,16 @@ void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
                 }
             }
 
-            // CRITICAL FIX: Base normals guarantee accurate fallback tangential shading on blocky meshes
             FMeshNormals::QuickComputeVertexNormals(ResultTask->LocalMesh);
 
-            AsyncTask(ENamedThreads::GameThread, [WeakThis, ResultTask]() {
-                if (ASmoothVoxelTerrain* T = WeakThis.Get()) T->MeshApplyQueue.Add(ResultTask);
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, ResultTask, TaskEpoch]() {
+                if (ASmoothVoxelTerrain* T = WeakThis.Get())
+                {
+                    if (!T->bIsDestroyed && T->GenerationEpoch == TaskEpoch)
+                    {
+                        T->MeshApplyQueue.Add(ResultTask);
+                    }
+                }
                 });
         });
 }
@@ -848,11 +1004,13 @@ void ASmoothVoxelTerrain::GenerateGrassMesh(const FIntVector& ChunkCoord)
 
     FTerrainGenConfig Config = GetTerrainConfig();
     TWeakObjectPtr<ASmoothVoxelTerrain> WeakThis(this);
+    uint32 TaskEpoch = GenerationEpoch;
 
-    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, SelfData, WestData, EastData, SouthData, NorthData]() mutable
+    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, SelfData, WestData, EastData, SouthData, NorthData, TaskEpoch]() mutable
         {
             if (!Config.bEnableGrassGeometry) return;
             TSharedPtr<FGrassApplyTask, ESPMode::ThreadSafe> ResultTask = MakeShared<FGrassApplyTask, ESPMode::ThreadSafe>();
+            ResultTask->Epoch = TaskEpoch;
             ResultTask->Coord = ChunkCoord;
             ResultTask->LocalGrassMesh.EnableAttributes();
             if (FDynamicMeshAttributeSet* GrassAttr = ResultTask->LocalGrassMesh.Attributes()) GrassAttr->SetNumUVLayers(2);
@@ -881,8 +1039,14 @@ void ASmoothVoxelTerrain::GenerateGrassMesh(const FIntVector& ChunkCoord)
 
             FMeshNormals::QuickComputeVertexNormals(ResultTask->LocalGrassMesh);
 
-            AsyncTask(ENamedThreads::GameThread, [WeakThis, ResultTask]() {
-                if (ASmoothVoxelTerrain* T = WeakThis.Get()) T->GrassApplyQueue.Add(ResultTask);
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, ResultTask, TaskEpoch]() {
+                if (ASmoothVoxelTerrain* T = WeakThis.Get())
+                {
+                    if (!T->bIsDestroyed && T->GenerationEpoch == TaskEpoch)
+                    {
+                        T->GrassApplyQueue.Add(ResultTask);
+                    }
+                }
                 });
         });
 }
@@ -894,18 +1058,22 @@ void ASmoothVoxelTerrain::UnloadChunk(const FIntVector& Coord)
     {
         if (Chunk)
         {
-            if (Chunk->MeshComponent) ReleaseMeshComponent(Chunk->MeshComponent, 0);
-            if (Chunk->GrassMeshComponent) ReleaseMeshComponent(Chunk->GrassMeshComponent, 1);
-            if (Chunk->WaterMeshComponent) ReleaseMeshComponent(Chunk->WaterMeshComponent, 2);
+            if (Chunk->MeshComponent.IsValid()) ReleaseMeshComponent(Chunk->MeshComponent.Get(), 0);
+            if (Chunk->GrassMeshComponent.IsValid()) ReleaseMeshComponent(Chunk->GrassMeshComponent.Get(), 1);
+            if (Chunk->WaterMeshComponent.IsValid()) ReleaseMeshComponent(Chunk->WaterMeshComponent.Get(), 2);
         }
     }
 }
 
 void ASmoothVoxelTerrain::FVoxelChunk::UpdateSharedFace(int32 LocalX, int32 LocalY, int32 LocalZ, ASmoothVoxelTerrain* TerrainOwner, const FIntVector& NeighborDirection)
 {
-    if (!VoxelData) return;
-    UDynamicMesh* DynamicMesh = MeshComponent ? MeshComponent->GetDynamicMesh() : nullptr;
-    UDynamicMesh* GrassDynamicMesh = (bGrassGenerated && GrassMeshComponent) ? GrassMeshComponent->GetDynamicMesh() : nullptr;
+    if (!VoxelData || !TerrainOwner || TerrainOwner->bIsDestroyed) return;
+    UDynamicMeshComponent* MeshComp = MeshComponent.Get();
+    UDynamicMeshComponent* GrassComp = GrassMeshComponent.Get();
+    if (!MeshComp || !IsValid(MeshComp)) return;
+
+    UDynamicMesh* DynamicMesh = MeshComp->GetDynamicMesh();
+    UDynamicMesh* GrassDynamicMesh = (bGrassGenerated && GrassComp && IsValid(GrassComp)) ? GrassComp->GetDynamicMesh() : nullptr;
     if (!DynamicMesh) return;
 
     auto UpdateBlockLogic = [&](FDynamicMesh3& MeshOut, FDynamicMesh3* GrassMeshOut)
@@ -951,17 +1119,16 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateSharedFace(int32 LocalX, int32 Loca
         if (GrassDynamicMesh) GrassDynamicMesh->EditMesh([&](FDynamicMesh3& GrassMeshOut) { UpdateBlockLogic(MeshOut, &GrassMeshOut); FMeshNormals::QuickComputeVertexNormals(GrassMeshOut); });
         else UpdateBlockLogic(MeshOut, nullptr);
 
-        // CRITICAL FIX: Ensure normal calculation runs on block modification
         FMeshNormals::QuickComputeVertexNormals(MeshOut);
         });
-    MeshComponent->UpdateCollision(true);
+    MeshComp->UpdateCollision(true);
 }
 
 void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxel(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner)
 {
-    if (!VoxelData) return;
+    if (!VoxelData || !TerrainOwner || TerrainOwner->bIsDestroyed) return;
     int32 Index = LocalX + LocalY * TerrainOwner->ChunkSize + LocalZ * TerrainOwner->ChunkSize * TerrainOwner->ChunkSize;
-    if ((*VoxelData)[Index] == NewType) return;
+    if (!VoxelData->IsValidIndex(Index) || (*VoxelData)[Index] == NewType) return;
     UpdateVoxelMesh(LocalX, LocalY, LocalZ, NewType, TerrainOwner);
 }
 
@@ -994,7 +1161,7 @@ void ASmoothVoxelTerrain::RemoveVoxel(FVector WorldLocation, FVector HitNormal)
     if (lx < 0 || lx >= ChunkSize || ly < 0 || ly >= ChunkSize || lz <= 0 || lz >= MaxHeight) return;
 
     int32 Index = lx + ly * ChunkSize + lz * ChunkSize * ChunkSize;
-    if ((*Chunk->VoxelData)[Index] == EVoxelType::Air) return;
+    if (!Chunk->VoxelData->IsValidIndex(Index) || (*Chunk->VoxelData)[Index] == EVoxelType::Air) return;
 
     Chunk->UpdateVoxel(lx, ly, lz, EVoxelType::Air, this);
 
@@ -1080,8 +1247,9 @@ EVoxelType ASmoothVoxelTerrain::GetVoxelAtWorld(int32 WorldX, int32 WorldY, int3
 }
 
 // ---------------------------------------------------------------------------------
-// 2D TERRAIN GENERATION (Pure Blocky)
+// 2D TERRAIN & 3D CAVE GENERATION (Minecraft Style)
 // ---------------------------------------------------------------------------------
+
 float FTerrainGenConfig::GetTerrainHeight(int32 WorldX, int32 WorldY) const
 {
     float BaseX = (float)WorldX; float BaseY = (float)WorldY;
@@ -1159,7 +1327,6 @@ float FTerrainGenConfig::GetTerrainHeight(int32 WorldX, int32 WorldY) const
     }
 
     float FinalHeightVoxels = TotalHeight / CubeSize;
-
     FinalHeightVoxels = FMath::Max(FinalHeightVoxels, (float)FloorLevel);
     FinalHeightVoxels = FMath::Max(FinalHeightVoxels, (float)BedrockLevel + 1.0f);
 
@@ -1169,13 +1336,111 @@ float FTerrainGenConfig::GetTerrainHeight(int32 WorldX, int32 WorldY) const
     return FinalHeightVoxels;
 }
 
+bool FTerrainGenConfig::IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const
+{
+    if (!CaveSettings.bEnableCaves) return false;
+    if (WorldZ <= BedrockLevel + CaveSettings.CaveBedrockSafetyMargin) return false;
+
+    float DistBelowSurface = SurfaceHeight - (float)WorldZ;
+    if (DistBelowSurface <= 0.0f) return false;
+
+    float DepthFactor = 1.0f;
+    if (DistBelowSurface < CaveSettings.CaveMaxHeightOffset)
+    {
+        float EntranceNoise = FastPerlinNoise2D((float)WorldX * 0.01f + Hash2D(Seed, 120), (float)WorldY * 0.01f + Hash2D(Seed, 121)) * 0.5f + 0.5f;
+        if (EntranceNoise > (1.0f - CaveSettings.SurfaceBreakthroughLikelihood))
+        {
+            DepthFactor = 1.0f;
+        }
+        else
+        {
+            DepthFactor = FMath::Clamp(DistBelowSurface / CaveSettings.CaveMaxHeightOffset, 0.0f, 1.0f);
+            DepthFactor = DepthFactor * DepthFactor * (3.0f - 2.0f * DepthFactor);
+        }
+    }
+
+    if (DepthFactor <= 0.01f) return false;
+
+    float fx = (float)WorldX;
+    float fy = (float)WorldY;
+    float fz = (float)WorldZ;
+
+    // --- 1. Chambers (Caverns / Cheese Caves) ---
+    float ChamberMacroMask = FastPerlinNoise3D(
+        fx * CaveSettings.ChamberFrequencyScale + Hash3D(Seed, 131, 1),
+        fy * CaveSettings.ChamberFrequencyScale + Hash3D(Seed, 132, 2),
+        fz * CaveSettings.ChamberFrequencyScale * 1.2f + Hash3D(Seed, 133, 3)
+    ) * 0.5f + 0.5f;
+
+    float ChamberNoise = 0.0f;
+    bool bInChamber = false;
+
+    if (ChamberMacroMask > 0.42f)
+    {
+        ChamberNoise = CalculateFBM3D(
+            fx, fy, fz * 1.3f, 2,
+            CaveSettings.ChamberNoiseScaleXZ,
+            1.0f,
+            Seed + 140
+        );
+
+        float DynamicThreshold = CaveSettings.ChamberThreshold - (ChamberMacroMask - 0.42f) * 0.45f;
+        if (ChamberNoise > DynamicThreshold)
+        {
+            bInChamber = true;
+        }
+    }
+
+    // --- 2. Tunnels (Spaghetti / Worm Caves) ---
+    float RadiusBonus = 0.0f;
+    if (ChamberMacroMask > 0.35f)
+    {
+        RadiusBonus = (ChamberMacroMask - 0.35f) * CaveSettings.TunnelChamberExpansion;
+    }
+
+    float EffectiveRadius = (CaveSettings.TunnelBaseRadius + RadiusBonus) * DepthFactor;
+    float EffectiveRadiusSq = EffectiveRadius * EffectiveRadius;
+
+    // Primary Tunnel Worm Noise
+    float T1A = FastPerlinNoise3D(
+        fx * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 150, 1),
+        fy * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 151, 2),
+        fz * CaveSettings.TunnelNoiseScaleY + Hash3D(Seed, 152, 3)
+    );
+    float T1B = FastPerlinNoise3D(
+        fx * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 153, 4),
+        fy * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 154, 5),
+        fz * CaveSettings.TunnelNoiseScaleY + Hash3D(Seed, 155, 6)
+    );
+
+    float DistSq1 = T1A * T1A + T1B * T1B;
+    if (DistSq1 < EffectiveRadiusSq) return true;
+
+    // Secondary Cross-Cutting Tunnel
+    float T2A = FastPerlinNoise3D(
+        (fx + 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 160, 1),
+        (fy + 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 161, 2),
+        fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 162, 3)
+    );
+    float T2B = FastPerlinNoise3D(
+        (fx - 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 163, 4),
+        (fy - 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 164, 5),
+        fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 165, 6)
+    );
+
+    float DistSq2 = T2A * T2A + T2B * T2B;
+    if (DistSq2 < EffectiveRadiusSq) return true;
+
+    return bInChamber;
+}
+
 FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const
 {
     float VoxX = (float)WorldPos.X / CubeSize, VoxY = (float)WorldPos.Y / CubeSize, VoxZ = (float)WorldPos.Z / CubeSize;
     if (VoxelType == EVoxelType::Grass) return FLinearColor::White;
     else if (VoxelType == EVoxelType::Dirt) return FastColorLerp(FLinearColor(0.12f, 0.07f, 0.05f, 1.0f), FLinearColor(0.20f, 0.12f, 0.08f, 1.0f), FastPerlinNoise2D(VoxX * 0.1f, VoxY * 0.1f) * 0.5f + 0.5f);
     else if (VoxelType == EVoxelType::Stone) return FastColorLerp(FLinearColor(0.18f, 0.20f, 0.22f, 1.0f), FLinearColor(0.30f, 0.32f, 0.34f, 1.0f), FastPerlinNoise3D(VoxX * 0.08f, VoxY * 0.08f, VoxZ * 0.08f) * 0.5f + 0.5f);
-    else if (VoxelType == EVoxelType::Surface) return FLinearColor(0.05f, 0.45f, 0.85f, 1.0f); // ADDED: Blueish tone
+    else if (VoxelType == EVoxelType::Surface) return FLinearColor(0.05f, 0.45f, 0.85f, 1.0f);
     return FLinearColor::White;
 }
 
@@ -1227,8 +1492,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             int32 vC = Mesh.AppendVertex(FVector3d(C)), vD = Mesh.AppendVertex(FVector3d(D));
             int32 nIdx = NormalOverlay->AppendElement(FixedNormal);
 
-            // CRITICAL FIX: Unreal rendering engine handles CCW orientation in FDynamicMesh3 geometry code to face outwards 
-            // properly. This also ensures UV mapping points natively map to correct tangent layouts!
             int32 t1 = Mesh.AppendTriangle(vA, vD, vC);
             if (t1 != FDynamicMesh3::InvalidID) {
                 OutTriIDs.Add(t1); NormalOverlay->SetTriangle(t1, FIndex3i(nIdx, nIdx, nIdx));
@@ -1245,7 +1508,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             }
         };
 
-    // Note how we provide exactly (BottomLeft, BottomRight, TopRight, TopLeft) to create perfect CCW math normals internally
     if (bExposedTop) AddQuadWorldFast(p001, p101, p111, p011, FVector3f(0.f, 0.f, 1.f), TopMatID, 0, 1);
     if (bExposedBottom) AddQuadWorldFast(p100, p000, p010, p110, FVector3f(0.f, 0.f, -1.f), BottomMatID, 0, 1);
     if (bExposedEast) AddQuadWorldFast(p100, p110, p111, p101, FVector3f(1.f, 0.f, 0.f), SideMatID, 1, 2);
@@ -1355,9 +1617,13 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
 
 void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner)
 {
-    if (!MeshComponent || !VoxelData) return;
-    UDynamicMesh* DynamicMesh = MeshComponent->GetDynamicMesh();
-    UDynamicMesh* GrassDynamicMesh = (bGrassGenerated && GrassMeshComponent) ? GrassMeshComponent->GetDynamicMesh() : nullptr;
+    if (!VoxelData || !TerrainOwner || TerrainOwner->bIsDestroyed) return;
+    UDynamicMeshComponent* MeshComp = MeshComponent.Get();
+    UDynamicMeshComponent* GrassComp = GrassMeshComponent.Get();
+    if (!MeshComp || !IsValid(MeshComp)) return;
+
+    UDynamicMesh* DynamicMesh = MeshComp->GetDynamicMesh();
+    UDynamicMesh* GrassDynamicMesh = (bGrassGenerated && GrassComp && IsValid(GrassComp)) ? GrassComp->GetDynamicMesh() : nullptr;
     if (!DynamicMesh) return;
 
     auto UpdateBlockLogic = [&](FDynamicMesh3& MeshOut, FDynamicMesh3* GrassMeshOut)
@@ -1400,10 +1666,9 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
         if (GrassDynamicMesh) GrassDynamicMesh->EditMesh([&](FDynamicMesh3& GrassMeshOut) { UpdateBlockLogic(MeshOut, &GrassMeshOut); FMeshNormals::QuickComputeVertexNormals(GrassMeshOut); });
         else UpdateBlockLogic(MeshOut, nullptr);
 
-        // CRITICAL FIX: Ensure normal calculation runs on block modification
         FMeshNormals::QuickComputeVertexNormals(MeshOut);
         });
-    MeshComponent->UpdateCollision(true);
+    MeshComp->UpdateCollision(true);
 }
 
 void ASmoothVoxelTerrain::FVoxelChunk::RemoveVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, FDynamicMesh3& Mesh, FDynamicMesh3* GrassMesh, ASmoothVoxelTerrain* TerrainOwner)
@@ -1481,14 +1746,14 @@ void ASmoothVoxelTerrain::PostEditChangeProperty(FPropertyChangedEvent& Property
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, bGenerateOverlapEvents), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, bCastShadow),
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, bReceivesDecals), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, GrassMaterial),
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, DirtMaterial), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, StoneMaterial),
-        GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, SurfaceMaterial), // ADDED
+        GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, SurfaceMaterial),
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, GrassBladesMaterial), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, WaterMaterial)
     };
 
     if (RelevantProperties.Contains(PropertyChangedEvent.GetPropertyName()))
     {
         for (auto& Pair : Chunks) {
-            if (Pair.Value && Pair.Value->MeshComponent) {
+            if (Pair.Value && Pair.Value->MeshComponent.IsValid()) {
                 Pair.Value->MeshComponent->SetCollisionEnabled(CollisionEnabled);
                 Pair.Value->MeshComponent->SetCollisionProfileName(CollisionProfileName);
                 Pair.Value->MeshComponent->SetGenerateOverlapEvents(bGenerateOverlapEvents);
@@ -1499,11 +1764,11 @@ void ASmoothVoxelTerrain::PostEditChangeProperty(FPropertyChangedEvent& Property
                 if (StoneMaterial) Pair.Value->MeshComponent->SetMaterial(2, StoneMaterial);
                 if (SurfaceMaterial) Pair.Value->MeshComponent->SetMaterial(3, SurfaceMaterial);
             }
-            if (Pair.Value && Pair.Value->GrassMeshComponent) {
+            if (Pair.Value && Pair.Value->GrassMeshComponent.IsValid()) {
                 Pair.Value->GrassMeshComponent->SetReceivesDecals(bReceivesDecals);
                 if (GrassBladesMaterial) Pair.Value->GrassMeshComponent->SetMaterial(0, GrassBladesMaterial);
             }
-            if (Pair.Value && Pair.Value->WaterMeshComponent) {
+            if (Pair.Value && Pair.Value->WaterMeshComponent.IsValid()) {
                 if (WaterMaterial) Pair.Value->WaterMeshComponent->SetMaterial(0, WaterMaterial);
             }
         }

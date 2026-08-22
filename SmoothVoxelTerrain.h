@@ -7,6 +7,9 @@
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/ThreadSafeBool.h"
+#include <atomic>
 #include "SmoothVoxelTerrain.generated.h"
 
 namespace UE::Geometry { class FDynamicMesh3; }
@@ -18,12 +21,11 @@ struct FChunkNeighborhood;
 UENUM(BlueprintType)
 enum class EVoxelType : uint8
 {
-    Air   UMETA(DisplayName = "Air"),
-    Surface UMETA(DisplayName = "Surface"),
-    Grass UMETA(DisplayName = "Grass"),
-    Dirt  UMETA(DisplayName = "Dirt"),
-    Stone UMETA(DisplayName = "Stone")
-
+    Air       UMETA(DisplayName = "Air"),
+    Surface   UMETA(DisplayName = "Surface"),
+    Grass     UMETA(DisplayName = "Grass"),
+    Dirt      UMETA(DisplayName = "Dirt"),
+    Stone     UMETA(DisplayName = "Stone")
 };
 
 enum class EChunkState : uint8
@@ -33,6 +35,52 @@ enum class EChunkState : uint8
     DataReady,
     GeneratingMesh,
     MeshReady
+};
+
+USTRUCT(BlueprintType)
+struct FCaveSettings
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves")
+    bool bEnableCaves = true;
+
+    // --- Tunnels (Spaghetti / Worm Caves) ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Tunnels", meta = (ClampMin = "0.001", ClampMax = "0.1"))
+    float TunnelNoiseScaleXZ = 0.018f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Tunnels", meta = (ClampMin = "0.001", ClampMax = "0.1"))
+    float TunnelNoiseScaleY = 0.022f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Tunnels", meta = (ClampMin = "0.01", ClampMax = "0.5"))
+    float TunnelBaseRadius = 0.065f;
+
+    // --- Chambers (Caverns / Cheese Caves) ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Chambers", meta = (ClampMin = "0.001", ClampMax = "0.1"))
+    float ChamberNoiseScaleXZ = 0.012f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Chambers", meta = (ClampMin = "0.001", ClampMax = "0.1"))
+    float ChamberNoiseScaleY = 0.016f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Chambers", meta = (ClampMin = "0.0005", ClampMax = "0.05"))
+    float ChamberFrequencyScale = 0.006f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Chambers", meta = (ClampMin = "0.1", ClampMax = "0.9"))
+    float ChamberThreshold = 0.52f;
+
+    // --- Tunnel & Chamber Relationship ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Relationship", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float TunnelChamberExpansion = 0.08f;
+
+    // --- Depth & Surface Constraints ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Surface & Depth", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+    float CaveMaxHeightOffset = 6.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Surface & Depth", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float SurfaceBreakthroughLikelihood = 0.08f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Surface & Depth")
+    int32 CaveBedrockSafetyMargin = 2;
 };
 
 USTRUCT(BlueprintType)
@@ -105,36 +153,36 @@ struct FBiomeGrasslandSettings
 
 struct FTerrainGenConfig
 {
-    int32 ChunkSize;
-    int32 FloorLevel;
-    int32 BedrockLevel;
-    int32 MaxHeight;
-    float CubeSize;
-    float MinGrassThickness;
-    int32 Seed;
-    bool bEnableWater;
-    int32 SeaLevel;
+    int32 ChunkSize = 32;
+    int32 FloorLevel = 0;
+    int32 BedrockLevel = -64;
+    int32 MaxHeight = 256;
+    float CubeSize = 100.0f;
+    float MinGrassThickness = 1.5f;
+    int32 Seed = 1337;
+    bool bEnableWater = true;
+    int32 SeaLevel = 38;
     FBiomeGrasslandSettings GrasslandBiome;
-    bool bEnableGrassGeometry;
-    int32 GrassMinDensity;
-    int32 GrassMaxDensity;
-    float GrassMinHeight;
-    float GrassMaxHeight;
-    float GrassMinWidth;
-    float GrassMaxWidth;
-    float GrassDensityNoiseScale;
-    int32 GrassBladeSegments;
-    bool bTwoSidedGrass;
-    float TextureScale;
+    FCaveSettings CaveSettings;
+    bool bEnableGrassGeometry = true;
+    int32 GrassMinDensity = 2;
+    int32 GrassMaxDensity = 6;
+    float GrassMinHeight = 35.0f;
+    float GrassMaxHeight = 75.0f;
+    float GrassMinWidth = 6.0f;
+    float GrassMaxWidth = 12.0f;
+    float GrassDensityNoiseScale = 0.03f;
+    int32 GrassBladeSegments = 1;
+    bool bTwoSidedGrass = true;
+    float TextureScale = 0.1f;
 
-    // Evaluates 2D biome parameters to return the max voxel height for an X, Y column
     float GetTerrainHeight(int32 WorldX, int32 WorldY) const;
+    bool IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const;
 
     FLinearColor GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const;
 
     void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
     void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
-
 };
 
 UCLASS()
@@ -145,7 +193,7 @@ class GROUNDUP_API ASmoothVoxelTerrain : public AActor
 public:
     struct FVoxelChunk
     {
-        FIntVector Coord;
+        FIntVector Coord = FIntVector::ZeroValue;
         EChunkState State = EChunkState::Unloaded;
 
         bool bGeneratingGrass = false;
@@ -157,9 +205,9 @@ public:
         TMap<int32, FTriIDArray> VoxelTriangles;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
 
-        UDynamicMeshComponent* MeshComponent = nullptr;
-        UDynamicMeshComponent* GrassMeshComponent = nullptr;
-        UDynamicMeshComponent* WaterMeshComponent = nullptr;
+        TWeakObjectPtr<UDynamicMeshComponent> MeshComponent;
+        TWeakObjectPtr<UDynamicMeshComponent> GrassMeshComponent;
+        TWeakObjectPtr<UDynamicMeshComponent> WaterMeshComponent;
 
         void UpdateVoxel(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
         void UpdateVoxelMesh(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
@@ -169,12 +217,13 @@ public:
     };
 
     ASmoothVoxelTerrain();
-    ~ASmoothVoxelTerrain();
+    virtual ~ASmoothVoxelTerrain() override;
 
 protected:
     virtual void BeginPlay() override;
     virtual void OnConstruction(const FTransform& Transform) override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+    virtual void BeginDestroy() override;
     virtual void Tick(float DeltaTime) override;
     void OnPlayerMoved(USceneComponent* UpdatedComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
 
@@ -213,18 +262,18 @@ public:
     void UpdateChunkVisibilityAndShadows();
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    UMaterialInterface* SurfaceMaterial = nullptr;
+    TObjectPtr<UMaterialInterface> SurfaceMaterial = nullptr;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    UMaterialInterface* GrassMaterial = nullptr;
+    TObjectPtr<UMaterialInterface> GrassMaterial = nullptr;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    UMaterialInterface* DirtMaterial = nullptr;
+    TObjectPtr<UMaterialInterface> DirtMaterial = nullptr;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    UMaterialInterface* StoneMaterial = nullptr;
+    TObjectPtr<UMaterialInterface> StoneMaterial = nullptr;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    UMaterialInterface* GrassBladesMaterial = nullptr;
+    TObjectPtr<UMaterialInterface> GrassBladesMaterial = nullptr;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    UMaterialInterface* WaterMaterial = nullptr;
+    TObjectPtr<UMaterialInterface> WaterMaterial = nullptr;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     int32 ChunkSize = 32;
@@ -248,6 +297,9 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Biomes")
     FBiomeGrasslandSettings GrasslandBiome;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Caves")
+    FCaveSettings CaveSettings;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     bool bEnableGrassGeometry = true;
@@ -315,7 +367,7 @@ private:
     TMap<FIntVector, TSharedPtr<FVoxelChunk>> Chunks;
 
     UPROPERTY(VisibleAnywhere)
-    USceneComponent* RootSceneComponent = nullptr;
+    TObjectPtr<USceneComponent> RootSceneComponent = nullptr;
 
     void GenerateChunks();
     FIntVector WorldToChunkCoord(const FVector& WorldPos) const;
@@ -324,7 +376,10 @@ private:
 
     bool bCollisionDirty = false;
     void UpdateCollisionIfNeeded();
-    bool bIsDestroyed = false;
+
+    std::atomic<bool> bIsDestroyed{ false };
+    std::atomic<uint32> GenerationEpoch{ 0 };
+    std::atomic<int32> InFlightTasksCount{ 0 };
 
     TWeakObjectPtr<USceneComponent> TrackedPlayerComponent;
 
@@ -335,6 +390,7 @@ private:
 
     struct FMeshApplyTask
     {
+        uint32 Epoch = 0;
         FIntVector Coord;
         UE::Geometry::FDynamicMesh3 LocalMesh;
         TMap<int32, FTriIDArray> VoxelTriangles;
@@ -342,18 +398,30 @@ private:
 
     struct FGrassApplyTask
     {
+        uint32 Epoch = 0;
         FIntVector Coord;
         UE::Geometry::FDynamicMesh3 LocalGrassMesh;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
     };
 
+    FCriticalSection QueueLock;
     TArray<TSharedPtr<FMeshApplyTask, ESPMode::ThreadSafe>> MeshApplyQueue;
     TArray<TSharedPtr<FGrassApplyTask, ESPMode::ThreadSafe>> GrassApplyQueue;
 
-    TArray<UDynamicMeshComponent*> MeshComponentPool;
-    TArray<UDynamicMeshComponent*> GrassMeshComponentPool;
-    TArray<UDynamicMeshComponent*> WaterMeshComponentPool;
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UDynamicMeshComponent>> MeshComponentPool;
+
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UDynamicMeshComponent>> GrassMeshComponentPool;
+
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UDynamicMeshComponent>> WaterMeshComponentPool;
+
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UDynamicMeshComponent>> ActiveComponents;
 
     UDynamicMeshComponent* AcquireMeshComponent(int32 MeshType);
     void ReleaseMeshComponent(UDynamicMeshComponent* Comp, int32 MeshType);
+    void CleanupAllComponents();
+    void WaitForAllTasks();
 };
