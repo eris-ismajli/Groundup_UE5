@@ -73,47 +73,23 @@ void AGroundupCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 
 void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
 {
-	FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
+	// DO NOT push the point out here. Let the terrain decide if it should replace
+	// the smooth block or place adjacently to a cubic block.
+	FVector ImpactPoint = HitResult.ImpactPoint;
+	FVector ImpactNormal = HitResult.ImpactNormal;
 
 	// Debug visualization for placement
 	if (bShowVoxelDebug && GetWorld())
 	{
-		// Impact point and normal
-		DrawDebugSphere(GetWorld(), HitResult.ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
-		DrawDebugLine(GetWorld(), HitResult.ImpactPoint,
-			HitResult.ImpactPoint + HitResult.ImpactNormal * 80.0f,
+		DrawDebugSphere(GetWorld(), ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
+		DrawDebugLine(GetWorld(), ImpactPoint,
+			ImpactPoint + ImpactNormal * 80.0f,
 			FColor::Yellow, false, VoxelDebugLife, 0, 2.0f);
-
-		// Placement location
-		DrawDebugSphere(GetWorld(), PlaceLocation, 8.0f, 8, FColor::Orange, false, VoxelDebugLife);
-
-		// Try to find the voxel that will be placed
-		int32 VoxelX, VoxelY, VoxelZ;
-		EVoxelType VoxelType;
-		if (HitTerrain->GetVoxelAtWorldPoint(PlaceLocation, VoxelX, VoxelY, VoxelZ, &VoxelType))
-		{
-			FVector WorldMin = HitTerrain->GetActorTransform().TransformPosition(FVector(
-				VoxelX * HitTerrain->CubeSize,
-				VoxelY * HitTerrain->CubeSize,
-				VoxelZ * HitTerrain->CubeSize));
-
-			FVector WorldMax = HitTerrain->GetActorTransform().TransformPosition(FVector(
-				(VoxelX + 1) * HitTerrain->CubeSize,
-				(VoxelY + 1) * HitTerrain->CubeSize,
-				(VoxelZ + 1) * HitTerrain->CubeSize));
-
-			FVector BoxCenter = (WorldMin + WorldMax) * 0.5f;
-			FVector BoxExtent = (WorldMax - WorldMin) * 0.5f;
-
-			DrawDebugBox(GetWorld(), BoxCenter, BoxExtent, FColor::Green, false, VoxelDebugLife);
-			DrawDebugSphere(GetWorld(), BoxCenter, 10.0f, 8, FColor::Green, false, VoxelDebugLife);
-			DrawDebugString(GetWorld(), HitResult.ImpactPoint + FVector(0, 0, 30),
-				FString::Printf(TEXT("Place Voxel (%d, %d, %d)"), VoxelX, VoxelY, VoxelZ),
-				nullptr, FColor::White, VoxelDebugLife);
-		}
 	}
 
-	HitTerrain->PlaceVoxel(PlaceLocation);
+	// We MUST pass all three arguments so the terrain knows the HitNormal.
+	// You can change EVoxelType::Stone to whatever block type the player is currently holding.
+	HitTerrain->PlaceVoxel(ImpactPoint, EVoxelType::Stone, ImpactNormal);
 }
 
 void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
@@ -136,7 +112,9 @@ void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHit
 	int32 VoxelX, VoxelY, VoxelZ;
 	EVoxelType VoxelType;
 
-	if (HitTerrain->GetVoxelAtWorldPoint(HitResult.ImpactPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
+	// CRITICAL FIX: Use 'AdjustedPoint' here instead of 'HitResult.ImpactPoint' so that exact 
+	// boundary impacts on positive faces properly truncate into the solid block.
+	if (HitTerrain->GetVoxelAtWorldPoint(AdjustedPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
 	{
 		bool bAutoAssisted = false;
 		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f);

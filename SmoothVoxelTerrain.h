@@ -15,28 +15,15 @@ using FTriIDArray = TArray<int32, TInlineAllocator<64>>;
 
 struct FChunkNeighborhood;
 
-struct FLocalDensityGrid
-{
-    const float* Densities;
-    int32 CacheSizeXY;
-    int32 CacheSizeZ;
-
-    FORCEINLINE float GetDensity(int32 LocalX, int32 LocalY, int32 LocalZ) const
-    {
-        int32 SafeX = FMath::Clamp(LocalX + 1, 0, CacheSizeXY - 1);
-        int32 SafeY = FMath::Clamp(LocalY + 1, 0, CacheSizeXY - 1);
-        int32 SafeZ = FMath::Clamp(LocalZ + 1, 0, CacheSizeZ - 1);
-        return Densities[SafeX + SafeY * CacheSizeXY + SafeZ * CacheSizeXY * CacheSizeXY];
-    }
-};
-
 UENUM(BlueprintType)
 enum class EVoxelType : uint8
 {
     Air   UMETA(DisplayName = "Air"),
+    Surface UMETA(DisplayName = "Surface"),
     Grass UMETA(DisplayName = "Grass"),
     Dirt  UMETA(DisplayName = "Dirt"),
     Stone UMETA(DisplayName = "Stone")
+
 };
 
 enum class EChunkState : uint8
@@ -125,7 +112,6 @@ struct FTerrainGenConfig
     float CubeSize;
     float MinGrassThickness;
     int32 Seed;
-    bool bSmoothTerrain;
     bool bEnableWater;
     int32 SeaLevel;
     FBiomeGrasslandSettings GrasslandBiome;
@@ -141,21 +127,14 @@ struct FTerrainGenConfig
     bool bTwoSidedGrass;
     float TextureScale;
 
-    float GetDensityAtWorldCoordinate(int32 WorldX, int32 WorldY, int32 WorldZ) const;
+    // Evaluates 2D biome parameters to return the max voxel height for an X, Y column
+    float GetTerrainHeight(int32 WorldX, int32 WorldY) const;
 
-    // Core surface trackers perfectly mapping back to the 2D logic
-    float GetSurfaceZLocal(int32 VertX, int32 VertY, int32 DefaultVertZ, const FLocalDensityGrid& DensityGrid) const;
-    float GetInterpolatedSurfaceZLocal(float LocalX, float LocalY, int32 LocalZ, const FLocalDensityGrid& DensityGrid) const;
-
-    // Voxel-Ownership tracking is restored (VoxX, VoxY, VoxZ)
-    FVector GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
-
-    FVector GetSmoothNormalLocal(int32 VertX, int32 VertY, int32 VertZ, const FLocalDensityGrid& DensityGrid) const;
-    float GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalDensityGrid& DensityGrid) const;
     FLinearColor GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const;
 
-    void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
-    void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalDensityGrid& DensityGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+    void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+    void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+
 };
 
 UCLASS()
@@ -174,7 +153,6 @@ public:
         bool bWaterGenerated = false;
 
         TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> VoxelData;
-        TSharedPtr<TArray<float>, ESPMode::ThreadSafe> DensityField;
 
         TMap<int32, FTriIDArray> VoxelTriangles;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
@@ -235,6 +213,9 @@ public:
     void UpdateChunkVisibilityAndShadows();
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
+    UMaterialInterface* SurfaceMaterial = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     UMaterialInterface* GrassMaterial = nullptr;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     UMaterialInterface* DirtMaterial = nullptr;
@@ -259,8 +240,6 @@ public:
     float MinGrassThickness = 1.5f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     int32 Seed = 1337;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
-    bool bSmoothTerrain = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Water")
     bool bEnableWater = true;
@@ -292,6 +271,8 @@ public:
     int32 GrassBladeSegments = 1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Grass")
     bool bTwoSidedGrass = true;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering")
+    float TextureScale = 0.1f;
 
     UFUNCTION(BlueprintCallable, Category = "Terrain")
     void RebuildTerrain();
@@ -320,8 +301,6 @@ public:
     int32 ShadowRenderDistance = 8;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering")
     bool bReceivesDecals = true;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Rendering")
-    float TextureScale = 0.1f;
 
 #if WITH_EDITOR
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
