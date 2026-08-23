@@ -514,7 +514,6 @@ UDynamicMeshComponent* ASmoothVoxelTerrain::AcquireMeshComponent(int32 MeshType)
         if (GrassMaterial) Comp->SetMaterial(0, GrassMaterial);
         if (DirtMaterial) Comp->SetMaterial(1, DirtMaterial);
         if (StoneMaterial) Comp->SetMaterial(2, StoneMaterial);
-        if (SurfaceMaterial) Comp->SetMaterial(3, SurfaceMaterial);
     }
 
     ActiveComponents.Add(Comp);
@@ -853,60 +852,6 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                         }
                     }
                 }
-            }
-
-            // 3. Clothed Voxels - Surface Layer Placement (for chunk & caves)
-            TSet<int32> SurfaceCandidates;
-
-            for (int32 lz = 0; lz < LocalMaxHeight; ++lz) {
-                for (int32 ly = -1; ly <= LocalChunkSize; ++ly) {
-                    for (int32 lx = -1; lx <= LocalChunkSize; ++lx) {
-                        bool bIsCore = false;
-
-                        if (lx >= 0 && lx < LocalChunkSize && ly >= 0 && ly < LocalChunkSize) {
-                            bIsCore = (*LocalVoxelData)[lx + ly * StepY + lz * StepZ] != EVoxelType::Air;
-                        }
-                        else {
-                            int32 WorldX = ChunkCoord.X * LocalChunkSize + lx;
-                            int32 WorldY = ChunkCoord.Y * LocalChunkSize + ly;
-                            int32 WorldZ = lz + LocalBedrockLevel;
-                            float Height = Config.GetTerrainHeight(WorldX, WorldY);
-                            int32 IntHeight = FMath::FloorToInt(Height);
-
-                            bIsCore = (lz <= 0) || (WorldZ <= IntHeight);
-                            if (bIsCore && lz > 0 && Config.CaveSettings.bEnableCaves) {
-                                if (Config.IsInsideCave(WorldX, WorldY, WorldZ, Height)) {
-                                    bIsCore = false;
-                                }
-                            }
-                        }
-
-                        if (bIsCore) {
-                            int32 Neighbors[6][3] = {
-                                {lx + 1, ly, lz}, {lx - 1, ly, lz},
-                                {lx, ly + 1, lz}, {lx, ly - 1, lz},
-                                {lx, ly, lz + 1}, {lx, ly, lz - 1}
-                            };
-
-                            for (int32 i = 0; i < 6; ++i) {
-                                int32 nx = Neighbors[i][0];
-                                int32 ny = Neighbors[i][1];
-                                int32 nz = Neighbors[i][2];
-
-                                if (nx >= 0 && nx < LocalChunkSize && ny >= 0 && ny < LocalChunkSize && nz >= 0 && nz < LocalMaxHeight) {
-                                    int32 NIndex = nx + ny * StepY + nz * StepZ;
-                                    if ((*LocalVoxelData)[NIndex] == EVoxelType::Air) {
-                                        SurfaceCandidates.Add(NIndex);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (int32 CandidateIndex : SurfaceCandidates) {
-                (*LocalVoxelData)[CandidateIndex] = EVoxelType::Surface;
             }
 
             AsyncTask(ENamedThreads::GameThread, [WeakThis, ChunkCoord, LocalVoxelData, TaskEpoch]()
@@ -1440,7 +1385,6 @@ FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos
     if (VoxelType == EVoxelType::Grass) return FLinearColor::White;
     else if (VoxelType == EVoxelType::Dirt) return FastColorLerp(FLinearColor(0.12f, 0.07f, 0.05f, 1.0f), FLinearColor(0.20f, 0.12f, 0.08f, 1.0f), FastPerlinNoise2D(VoxX * 0.1f, VoxY * 0.1f) * 0.5f + 0.5f);
     else if (VoxelType == EVoxelType::Stone) return FastColorLerp(FLinearColor(0.18f, 0.20f, 0.22f, 1.0f), FLinearColor(0.30f, 0.32f, 0.34f, 1.0f), FastPerlinNoise3D(VoxX * 0.08f, VoxY * 0.08f, VoxZ * 0.08f) * 0.5f + 0.5f);
-    else if (VoxelType == EVoxelType::Surface) return FLinearColor(0.05f, 0.45f, 0.85f, 1.0f);
     return FLinearColor::White;
 }
 
@@ -1474,7 +1418,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
     if (CurrentType == EVoxelType::Grass) { TopMatID = 0; BottomMatID = SideMatID = 1; }
     else if (CurrentType == EVoxelType::Dirt) { TopMatID = BottomMatID = SideMatID = 1; }
     else if (CurrentType == EVoxelType::Stone) { TopMatID = BottomMatID = SideMatID = 2; }
-    else if (CurrentType == EVoxelType::Surface) { TopMatID = BottomMatID = SideMatID = 3; }
 
     FVector Origin((double)WorldX * CubeSize, (double)WorldY * CubeSize, (double)WorldZ * CubeSize);
     FVector p000 = Origin, p100 = Origin + FVector(CubeSize, 0, 0), p010 = Origin + FVector(0, CubeSize, 0), p110 = Origin + FVector(CubeSize, CubeSize, 0);
@@ -1746,7 +1689,6 @@ void ASmoothVoxelTerrain::PostEditChangeProperty(FPropertyChangedEvent& Property
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, bGenerateOverlapEvents), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, bCastShadow),
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, bReceivesDecals), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, GrassMaterial),
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, DirtMaterial), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, StoneMaterial),
-        GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, SurfaceMaterial),
         GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, GrassBladesMaterial), GET_MEMBER_NAME_CHECKED(ASmoothVoxelTerrain, WaterMaterial)
     };
 
@@ -1762,7 +1704,6 @@ void ASmoothVoxelTerrain::PostEditChangeProperty(FPropertyChangedEvent& Property
                 if (GrassMaterial) Pair.Value->MeshComponent->SetMaterial(0, GrassMaterial);
                 if (DirtMaterial) Pair.Value->MeshComponent->SetMaterial(1, DirtMaterial);
                 if (StoneMaterial) Pair.Value->MeshComponent->SetMaterial(2, StoneMaterial);
-                if (SurfaceMaterial) Pair.Value->MeshComponent->SetMaterial(3, SurfaceMaterial);
             }
             if (Pair.Value && Pair.Value->GrassMeshComponent.IsValid()) {
                 Pair.Value->GrassMeshComponent->SetReceivesDecals(bReceivesDecals);

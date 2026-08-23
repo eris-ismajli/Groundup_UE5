@@ -22,7 +22,6 @@ UENUM(BlueprintType)
 enum class EVoxelType : uint8
 {
     Air       UMETA(DisplayName = "Air"),
-    Surface   UMETA(DisplayName = "Surface"),
     Grass     UMETA(DisplayName = "Grass"),
     Dirt      UMETA(DisplayName = "Dirt"),
     Stone     UMETA(DisplayName = "Stone")
@@ -260,9 +259,6 @@ public:
     bool CheckNeighborsDataReady(const FIntVector& ChunkCoord);
 
     void UpdateChunkVisibilityAndShadows();
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
-    TObjectPtr<UMaterialInterface> SurfaceMaterial = nullptr;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Materials")
     TObjectPtr<UMaterialInterface> GrassMaterial = nullptr;
