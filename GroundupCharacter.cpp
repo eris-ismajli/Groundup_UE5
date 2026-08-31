@@ -71,57 +71,26 @@ void AGroundupCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 }
 
 
-void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
-{
-	// DO NOT push the point out here. Let the terrain decide if it should replace
-	// the smooth block or place adjacently to a cubic block.
-	FVector ImpactPoint = HitResult.ImpactPoint;
-	FVector ImpactNormal = HitResult.ImpactNormal;
-
-	// Debug visualization for placement
-	if (bShowVoxelDebug && GetWorld())
-	{
-		DrawDebugSphere(GetWorld(), ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
-		DrawDebugLine(GetWorld(), ImpactPoint,
-			ImpactPoint + ImpactNormal * 80.0f,
-			FColor::Yellow, false, VoxelDebugLife, 0, 2.0f);
-	}
-
-	// We MUST pass all three arguments so the terrain knows the HitNormal.
-	// You can change EVoxelType::Stone to whatever block type the player is currently holding.
-	HitTerrain->PlaceVoxel(ImpactPoint, EVoxelType::Stone, ImpactNormal);
+void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+	FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
+	HitTerrain->PlaceVoxel(PlaceLocation);
 }
 
-void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
-{
-	const float CubeSize = HitTerrain->CubeSize;
-
+void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
 	// Nudge the impact point inward along the hit normal to avoid boundary ambiguity
-	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * CubeSize * 0.01f;
-
-	// Debug visualization for removal
-	if (bShowVoxelDebug && GetWorld())
-	{
-		DrawDebugSphere(GetWorld(), HitResult.ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
-		DrawDebugLine(GetWorld(), HitResult.ImpactPoint,
-			HitResult.ImpactPoint + HitResult.ImpactNormal * 80.0f,
-			FColor::Yellow, false, VoxelDebugLife, 0, 2.0f);
-		DrawDebugSphere(GetWorld(), AdjustedPoint, 8.0f, 8, FColor::Orange, false, VoxelDebugLife);
-	}
+	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.01f;
 
 	int32 VoxelX, VoxelY, VoxelZ;
 	EVoxelType VoxelType;
 
-	// CRITICAL FIX: Use 'AdjustedPoint' here instead of 'HitResult.ImpactPoint' so that exact 
-	// boundary impacts on positive faces properly truncate into the solid block.
 	if (HitTerrain->GetVoxelAtWorldPoint(AdjustedPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
 	{
-		bool bAutoAssisted = false;
-		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f);
+		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f); // roughly upward
 
-		// Auto-assist only when clicking the top face AND hitting air
+		// Auto‑assist only when clicking the top face AND hitting air
 		if (bIsTopFace && VoxelType == EVoxelType::Air)
 		{
+			// Check the voxel directly below
 			int32 BelowX = VoxelX;
 			int32 BelowY = VoxelY;
 			int32 BelowZ = VoxelZ - 1;
@@ -133,17 +102,10 @@ void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHit
 				VoxelY = BelowY;
 				VoxelZ = BelowZ;
 				VoxelType = BelowType;
-				bAutoAssisted = true;
 			}
 			else
 			{
-				if (bShowVoxelDebug && GetWorld())
-				{
-					DrawDebugString(GetWorld(), HitResult.ImpactPoint,
-						TEXT("Air below air - no break"),
-						nullptr, FColor::Magenta, VoxelDebugLife);
-				}
-				return;
+				return; // nothing to break
 			}
 		}
 
@@ -151,40 +113,11 @@ void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHit
 		if (VoxelType != EVoxelType::Air)
 		{
 			FVector LocalCenter(
-				VoxelX * CubeSize + CubeSize * 0.5f,
-				VoxelY * CubeSize + CubeSize * 0.5f,
-				VoxelZ * CubeSize + CubeSize * 0.5f
+				VoxelX * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
+				VoxelY * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f,
+				VoxelZ * HitTerrain->CubeSize + HitTerrain->CubeSize * 0.5f
 			);
 			FVector WorldCenter = HitTerrain->GetActorTransform().TransformPosition(LocalCenter);
-
-			// Debug visualization of the voxel being removed
-			if (bShowVoxelDebug && GetWorld())
-			{
-				FVector WorldMin = HitTerrain->GetActorTransform().TransformPosition(FVector(
-					VoxelX * CubeSize,
-					VoxelY * CubeSize,
-					VoxelZ * CubeSize));
-
-				FVector WorldMax = HitTerrain->GetActorTransform().TransformPosition(FVector(
-					(VoxelX + 1) * CubeSize,
-					(VoxelY + 1) * CubeSize,
-					(VoxelZ + 1) * CubeSize));
-
-				FVector BoxCenter = (WorldMin + WorldMax) * 0.5f;
-				FVector BoxExtent = (WorldMax - WorldMin) * 0.5f;
-
-				FColor BoxColor = bAutoAssisted ? FColor::Green : FColor::Cyan;
-
-				DrawDebugBox(GetWorld(), BoxCenter, BoxExtent, BoxColor, false, VoxelDebugLife);
-				DrawDebugSphere(GetWorld(), WorldCenter, 10.0f, 8, BoxColor, false, VoxelDebugLife);
-
-				DrawDebugString(GetWorld(), HitResult.ImpactPoint + FVector(0, 0, 30),
-					FString::Printf(TEXT("Break Voxel (%d, %d, %d) Type: %d%s"),
-						VoxelX, VoxelY, VoxelZ,
-						(int32)VoxelType,
-						bAutoAssisted ? TEXT(" (auto-assisted below)") : TEXT("")),
-					nullptr, FColor::White, VoxelDebugLife);
-			}
 
 			HitTerrain->RemoveVoxel(WorldCenter);
 		}
