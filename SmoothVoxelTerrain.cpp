@@ -988,7 +988,8 @@ void ASmoothVoxelTerrain::RemoveVoxel(FVector WorldLocation)
     FVoxelChunk* Chunk = GetChunk(ChunkCoord);
     if (!Chunk || !Chunk->VoxelData) return;
     int32 lx, ly, lz; WorldToLocalVoxel(WorldLocation, ChunkCoord, lx, ly, lz);
-    if (lx < 0 || lx >= ChunkSize || ly < 0 || ly >= ChunkSize || lz <= 0 || lz >= MaxHeight) return;
+
+    if (lx < 0 || lx >= ChunkSize || ly < 0 || ly >= ChunkSize || lz < 0 || lz >= MaxHeight) return;
     int32 Index = lx + ly * ChunkSize + lz * ChunkSize * ChunkSize;
     if ((*Chunk->VoxelData)[Index] == EVoxelType::Air) return;
 
@@ -1162,9 +1163,24 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
     float FinalZ = (float)(VertZ + BedrockLevel);
 
     if (!bSmoothTerrain) return FVector(WorldX, WorldY, FinalZ) * CubeSize;
-    if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) == EVoxelType::Grass && VertZ > VoxZ) {
-        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) != EVoxelType::Air) return FVector(WorldX, WorldY, FinalZ) * CubeSize;
-        FinalZ = HeightGrid.GetHeight(VertX, VertY);
+
+    EVoxelType VoxelType = Neighborhood.GetVoxel(VoxX, VoxY, VoxZ);
+    if (VoxelType != EVoxelType::Air && VertZ > VoxZ) {
+        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) == EVoxelType::Air) {
+
+            float H00 = HeightGrid.GetHeight(VoxX, VoxY);
+            float H10 = HeightGrid.GetHeight(VoxX + 1, VoxY);
+            float H01 = HeightGrid.GetHeight(VoxX, VoxY + 1);
+            float H11 = HeightGrid.GetHeight(VoxX + 1, VoxY + 1);
+            float MinCorner = FMath::Min3(H00, H10, FMath::Min(H01, H11));
+
+            // ExpectedGroundLevel replicates the exact generation logic for this specific voxel
+            int32 ExpectedGroundLevel = FMath::Clamp(FMath::FloorToInt(MinCorner - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
+
+            if (VoxZ == ExpectedGroundLevel) {
+                FinalZ = HeightGrid.GetHeight(VertX, VertY);
+            }
+        }
     }
     return FVector(WorldX, WorldY, FinalZ) * CubeSize;
 }
@@ -1177,15 +1193,33 @@ FVector FTerrainGenConfig::GetSmoothNormalLocal(int32 VertX, int32 VertY, const 
 float FTerrainGenConfig::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalHeightGrid& HeightGrid) const
 {
     EVoxelType neighborType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ);
+    int32 GridX = FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.SelfCoord.X * ChunkSize;
+    int32 GridY = FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.SelfCoord.Y * ChunkSize;
+
+    auto GetExpectedGroundLevel = [&](int32 VX, int32 VY) {
+        float H00 = HeightGrid.GetHeight(VX, VY);
+        float H10 = HeightGrid.GetHeight(VX + 1, VY);
+        float H01 = HeightGrid.GetHeight(VX, VY + 1);
+        float H11 = HeightGrid.GetHeight(VX + 1, VY + 1);
+        return FMath::Clamp(FMath::FloorToInt(FMath::Min3(H00, H10, FMath::Min(H01, H11)) - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
+        };
+
     if (neighborType != EVoxelType::Air) {
         if (Neighborhood.GetVoxel(LocalX, LocalY, LocalZ + 1) != EVoxelType::Air) return FLT_MAX;
-        if (neighborType == EVoxelType::Grass) return HeightGrid.GetHeight(FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.SelfCoord.X * ChunkSize, FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.SelfCoord.Y * ChunkSize) * CubeSize;
+
+        if (LocalZ == GetExpectedGroundLevel(LocalX, LocalY)) {
+            return HeightGrid.GetHeight(GridX, GridY) * CubeSize;
+        }
         return (LocalZ + 1 + BedrockLevel) * CubeSize;
     }
     else {
         EVoxelType belowType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ - 1);
-        if (belowType == EVoxelType::Grass) return HeightGrid.GetHeight(FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.SelfCoord.X * ChunkSize, FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.SelfCoord.Y * ChunkSize) * CubeSize;
-        else if (belowType != EVoxelType::Air) return (LocalZ + BedrockLevel) * CubeSize;
+        if (belowType != EVoxelType::Air) {
+            if ((LocalZ - 1) == GetExpectedGroundLevel(LocalX, LocalY)) {
+                return HeightGrid.GetHeight(GridX, GridY) * CubeSize;
+            }
+            return (LocalZ + BedrockLevel) * CubeSize;
+        }
         return -FLT_MAX;
     }
 }
@@ -1513,8 +1547,19 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
         FVector GroundNormal(0.f, 0.f, 1.f);
 
         if (bSmoothTerrain) {
-            BladeWorldZ = GetInterpolatedHeightLocal(BladeLocalX, BladeLocalY, HeightGrid) * CubeSize;
-            GroundNormal = GetSmoothNormalLocal(FMath::RoundToInt(BladeLocalX), FMath::RoundToInt(BladeLocalY), HeightGrid);
+            float H00 = HeightGrid.GetHeight(lx, ly);
+            float H10 = HeightGrid.GetHeight(lx + 1, ly);
+            float H01 = HeightGrid.GetHeight(lx, ly + 1);
+            float H11 = HeightGrid.GetHeight(lx + 1, ly + 1);
+            int32 ExpectedGroundLevel = FMath::Clamp(FMath::FloorToInt(FMath::Min3(H00, H10, FMath::Min(H01, H11)) - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
+
+            if (lz == ExpectedGroundLevel) {
+                BladeWorldZ = GetInterpolatedHeightLocal(BladeLocalX, BladeLocalY, HeightGrid) * CubeSize;
+                GroundNormal = GetSmoothNormalLocal(FMath::RoundToInt(BladeLocalX), FMath::RoundToInt(BladeLocalY), HeightGrid);
+            }
+            else {
+                BladeWorldZ = (float)(lz + 1 + BedrockLevel) * CubeSize;
+            }
         }
         else BladeWorldZ = (float)(lz + 1 + BedrockLevel) * CubeSize;
 
