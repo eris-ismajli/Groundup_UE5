@@ -191,6 +191,10 @@ struct FChunkNeighborhood
     const EVoxelType* EastData = nullptr;
     const EVoxelType* SouthData = nullptr;
     const EVoxelType* NorthData = nullptr;
+    const EVoxelType* SouthWestData = nullptr;
+    const EVoxelType* SouthEastData = nullptr;
+    const EVoxelType* NorthWestData = nullptr;
+    const EVoxelType* NorthEastData = nullptr;
 
     int32 ChunkSize = 32;
     int32 MaxHeight = 256;
@@ -205,14 +209,21 @@ struct FChunkNeighborhood
         if (uint32(LocalX) < uint32(ChunkSize) && uint32(LocalY) < uint32(ChunkSize))
             return SelfData[LocalX + LocalY * StepY + LocalZ * StepZ];
 
-        const EVoxelType* TargetData = SelfData;
         int32 LX = LocalX, LY = LocalY;
+        int32 SX = 0, SY = 0;
 
-        if (LX < 0) { TargetData = WestData; LX += ChunkSize; }
-        else if (LX >= ChunkSize) { TargetData = EastData; LX -= ChunkSize; }
+        if (LX < 0) { SX = -1; LX += ChunkSize; }
+        else if (LX >= ChunkSize) { SX = 1; LX -= ChunkSize; }
 
-        if (LY < 0) { TargetData = SouthData; LY += ChunkSize; }
-        else if (LY >= ChunkSize) { TargetData = NorthData; LY -= ChunkSize; }
+        if (LY < 0) { SY = -1; LY += ChunkSize; }
+        else if (LY >= ChunkSize) { SY = 1; LY -= ChunkSize; }
+
+        // The original picked one pointer per axis and let the second overwrite the
+        // first, so a corner read landed in the wrong chunk. Diagonals are now explicit.
+        const EVoxelType* TargetData = nullptr;
+        if (SX == 0)      TargetData = (SY < 0) ? SouthData : NorthData;
+        else if (SX < 0)  TargetData = (SY == 0) ? WestData : (SY < 0 ? SouthWestData : NorthWestData);
+        else              TargetData = (SY == 0) ? EastData : (SY < 0 ? SouthEastData : NorthEastData);
 
         if (!TargetData) return EVoxelType::Stone;
 
@@ -640,7 +651,15 @@ void ASmoothVoxelTerrain::ProcessTasks()
 
 bool ASmoothVoxelTerrain::CheckNeighborsDataReady(const FIntVector& ChunkCoord)
 {
-    FIntVector Neighbors[4] = { FIntVector(ChunkCoord.X - 1, ChunkCoord.Y, 0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y, 0), FIntVector(ChunkCoord.X, ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X, ChunkCoord.Y + 1, 0) };
+    // Eight, not four: the cave vertex rule reads the 8 voxels around a lattice vertex,
+    // which at a chunk corner reaches into the diagonal chunk. Meshing without it would
+    // give that corner a different answer than the diagonal chunk gives, i.e. a crack.
+    const FIntVector Neighbors[8] = {
+        FIntVector(ChunkCoord.X - 1, ChunkCoord.Y,     0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y,     0),
+        FIntVector(ChunkCoord.X,     ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X,     ChunkCoord.Y + 1, 0),
+        FIntVector(ChunkCoord.X - 1, ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y - 1, 0),
+        FIntVector(ChunkCoord.X - 1, ChunkCoord.Y + 1, 0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y + 1, 0)
+    };
     for (const FIntVector& N : Neighbors) {
         FVoxelChunk* C = GetChunk(N);
         if (!C || (C->State != EChunkState::DataReady && C->State != EChunkState::GeneratingMesh && C->State != EChunkState::MeshReady)) return false;
@@ -676,26 +695,31 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
     Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config]() mutable
         {
             int32 LocalChunkSize = Config.ChunkSize, LocalMaxHeight = Config.MaxHeight, LocalBedrockLevel = Config.BedrockLevel;
-            float LocalMinGrassThickness = Config.MinGrassThickness;
 
             TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> LocalVoxelData = MakeShared<TArray<EVoxelType>, ESPMode::ThreadSafe>();
             LocalVoxelData->SetNumZeroed(LocalChunkSize * LocalChunkSize * LocalMaxHeight);
 
-            int32 CacheSize = LocalChunkSize + 3;
+            // Halo is 2 columns on each side. The cave relaxation pass reads cells two
+            // out from a chunk-edge vertex, and each of those cells needs its own four
+            // corner heights, so the grid must span [-2, ChunkSize+2].
+            int32 CacheSize = LocalChunkSize + 5;
             TSharedPtr<TArray<float>, ESPMode::ThreadSafe> LocalHeightMap = MakeShared<TArray<float>, ESPMode::ThreadSafe>();
             LocalHeightMap->SetNumUninitialized(CacheSize * CacheSize);
 
             for (int32 y = 0; y < CacheSize; ++y) {
-                int32 WorldY = ChunkCoord.Y * LocalChunkSize - 1 + y;
+                int32 WorldY = ChunkCoord.Y * LocalChunkSize - 2 + y;
                 for (int32 x = 0; x < CacheSize; ++x) {
-                    (*LocalHeightMap)[x + y * CacheSize] = Config.GetHeightAtWorldCorner(ChunkCoord.X * LocalChunkSize - 1 + x, WorldY);
+                    (*LocalHeightMap)[x + y * CacheSize] = Config.GetHeightAtWorldCorner(ChunkCoord.X * LocalChunkSize - 2 + x, WorldY);
                 }
             }
 
+            FLocalHeightGrid GenHeightGrid;
+            GenHeightGrid.Heights = LocalHeightMap->GetData();
+            GenHeightGrid.CacheSize = CacheSize;
+
             for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
                 for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
-                    float MinCorner = FMath::Min3((*LocalHeightMap)[(lx + 1) + (ly + 1) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 1) * CacheSize], FMath::Min((*LocalHeightMap)[(lx + 1) + (ly + 2) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 2) * CacheSize]));
-                    int32 GroundLevel = FMath::Clamp(FMath::FloorToInt(MinCorner - LocalMinGrassThickness) - LocalBedrockLevel, 0, LocalMaxHeight - 1);
+                    int32 GroundLevel = Config.GetGroundLevelLocal(lx, ly, GenHeightGrid);
                     int32 BaseIdx = lx + ly * LocalChunkSize, Step = LocalChunkSize * LocalChunkSize;
                     for (int32 lz = 0; lz < LocalMaxHeight; ++lz) {
                         int32 Index = BaseIdx + lz * Step;
@@ -718,8 +742,7 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                         int32 WorldX = ChunkCoord.X * LocalChunkSize + lx;
                         int32 WorldY = ChunkCoord.Y * LocalChunkSize + ly;
 
-                        float MinCorner = FMath::Min3((*LocalHeightMap)[(lx + 1) + (ly + 1) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 1) * CacheSize], FMath::Min((*LocalHeightMap)[(lx + 1) + (ly + 2) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 2) * CacheSize]));
-                        float SurfaceHeight = MinCorner;
+                        float SurfaceHeight = Config.GetSurfaceHeightLocal(lx, ly, GenHeightGrid);
 
                         int32 BaseIdx = lx + ly * StepY;
 
@@ -740,7 +763,7 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                 for (int32 ly = 0; ly < LocalChunkSize; ++ly) {
                     for (int32 lx = 0; lx < LocalChunkSize; ++lx) {
                         int32 BaseIdx = lx + ly * StepY;
-                        float SurfHeight = FMath::Min3((*LocalHeightMap)[(lx + 1) + (ly + 1) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 1) * CacheSize], FMath::Min((*LocalHeightMap)[(lx + 1) + (ly + 2) * CacheSize], (*LocalHeightMap)[(lx + 2) + (ly + 2) * CacheSize]));
+                        float SurfHeight = Config.GetSurfaceHeightLocal(lx, ly, GenHeightGrid);
 
                         for (int32 lz = LocalMaxHeight - 2; lz >= 1; --lz) {
                             int32 Index = BaseIdx + lz * StepZ;
@@ -772,7 +795,15 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                     if (FVoxelChunk* TargetChunk = Terrain->GetChunk(ChunkCoord)) {
                         TargetChunk->VoxelData = LocalVoxelData; TargetChunk->HeightMap = LocalHeightMap; TargetChunk->State = EChunkState::DataReady;
                         if (Terrain->CheckNeighborsDataReady(ChunkCoord)) Terrain->MeshGenerationQueue.AddUnique(ChunkCoord);
-                        FIntVector Neighbors[4] = { FIntVector(ChunkCoord.X - 1, ChunkCoord.Y, 0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y, 0), FIntVector(ChunkCoord.X, ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X, ChunkCoord.Y + 1, 0) };
+
+                        // Must cover the same eight the readiness test does, or a chunk
+                        // blocked only on a diagonal would never be woken up again.
+                        const FIntVector Neighbors[8] = {
+                            FIntVector(ChunkCoord.X - 1, ChunkCoord.Y,     0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y,     0),
+                            FIntVector(ChunkCoord.X,     ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X,     ChunkCoord.Y + 1, 0),
+                            FIntVector(ChunkCoord.X - 1, ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y - 1, 0),
+                            FIntVector(ChunkCoord.X - 1, ChunkCoord.Y + 1, 0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y + 1, 0)
+                        };
                         for (const FIntVector& N : Neighbors) {
                             if (FVoxelChunk* NChunk = Terrain->GetChunk(N))
                                 if (NChunk->State == EChunkState::DataReady && Terrain->CheckNeighborsDataReady(N)) Terrain->MeshGenerationQueue.AddUnique(N);
@@ -791,16 +822,21 @@ void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
     TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> SelfData = Chunk->VoxelData;
     TSharedPtr<TArray<float>, ESPMode::ThreadSafe> HeightMap = Chunk->HeightMap;
     TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> WestData, EastData, SouthData, NorthData;
+    TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> SWData, SEData, NWData, NEData;
 
     if (auto* C = GetChunk(ChunkCoord + FIntVector(-1, 0, 0))) WestData = C->VoxelData;
     if (auto* C = GetChunk(ChunkCoord + FIntVector(1, 0, 0))) EastData = C->VoxelData;
     if (auto* C = GetChunk(ChunkCoord + FIntVector(0, -1, 0))) SouthData = C->VoxelData;
     if (auto* C = GetChunk(ChunkCoord + FIntVector(0, 1, 0))) NorthData = C->VoxelData;
+    if (auto* C = GetChunk(ChunkCoord + FIntVector(-1, -1, 0))) SWData = C->VoxelData;
+    if (auto* C = GetChunk(ChunkCoord + FIntVector(1, -1, 0))) SEData = C->VoxelData;
+    if (auto* C = GetChunk(ChunkCoord + FIntVector(-1, 1, 0))) NWData = C->VoxelData;
+    if (auto* C = GetChunk(ChunkCoord + FIntVector(1, 1, 0))) NEData = C->VoxelData;
 
     FTerrainGenConfig Config = GetTerrainConfig();
     TWeakObjectPtr<ASmoothVoxelTerrain> WeakThis(this);
 
-    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, SelfData, HeightMap, WestData, EastData, SouthData, NorthData]() mutable
+    Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, Config, SelfData, HeightMap, WestData, EastData, SouthData, NorthData, SWData, SEData, NWData, NEData]() mutable
         {
             TSharedPtr<FMeshApplyTask, ESPMode::ThreadSafe> ResultTask = MakeShared<FMeshApplyTask, ESPMode::ThreadSafe>();
             ResultTask->Coord = ChunkCoord;
@@ -811,20 +847,27 @@ void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
             Neighborhood.SelfData = SelfData->GetData();
             Neighborhood.WestData = WestData ? WestData->GetData() : nullptr; Neighborhood.EastData = EastData ? EastData->GetData() : nullptr;
             Neighborhood.SouthData = SouthData ? SouthData->GetData() : nullptr; Neighborhood.NorthData = NorthData ? NorthData->GetData() : nullptr;
+            Neighborhood.SouthWestData = SWData ? SWData->GetData() : nullptr; Neighborhood.SouthEastData = SEData ? SEData->GetData() : nullptr;
+            Neighborhood.NorthWestData = NWData ? NWData->GetData() : nullptr; Neighborhood.NorthEastData = NEData ? NEData->GetData() : nullptr;
             Neighborhood.ChunkSize = Config.ChunkSize; Neighborhood.MaxHeight = Config.MaxHeight; Neighborhood.StepY = Config.ChunkSize; Neighborhood.StepZ = Config.ChunkSize * Config.ChunkSize;
             Neighborhood.SelfCoord = ChunkCoord;
 
             FLocalHeightGrid HeightGrid;
-            HeightGrid.Heights = HeightMap->GetData(); HeightGrid.CacheSize = Config.ChunkSize + 3;
+            HeightGrid.Heights = HeightMap->GetData(); HeightGrid.CacheSize = Config.ChunkSize + 5;
+
+            FCaveSmoothCache CaveCache;
+            CaveCache.Init(&Config, &HeightGrid, &Neighborhood, ChunkCoord);
+
             FTriIDArray TempTriIDs;
 
+            // z outermost: this is what keeps the cave cache's rolling slabs coherent.
             for (int32 lz = 0; lz < Config.MaxHeight; ++lz) {
                 for (int32 ly = 0; ly < Config.ChunkSize; ++ly) {
                     for (int32 lx = 0; lx < Config.ChunkSize; ++lx) {
                         int32 Index = lx + ly * Config.ChunkSize + lz * Neighborhood.StepZ;
                         if (Neighborhood.SelfData[Index] == EVoxelType::Air) continue;
                         TempTriIDs.Reset();
-                        Config.AppendVoxelFacesLocal(lx, ly, lz, ResultTask->LocalMesh, TempTriIDs, HeightGrid, Neighborhood, ChunkCoord);
+                        Config.AppendVoxelFacesLocal(lx, ly, lz, ResultTask->LocalMesh, TempTriIDs, HeightGrid, Neighborhood, ChunkCoord, &CaveCache);
                         if (TempTriIDs.Num() > 0) ResultTask->VoxelTriangles.Add(Index, TempTriIDs);
                     }
                 }
@@ -870,7 +913,7 @@ void ASmoothVoxelTerrain::GenerateGrassMesh(const FIntVector& ChunkCoord)
             Neighborhood.SelfCoord = ChunkCoord;
 
             FLocalHeightGrid HeightGrid;
-            HeightGrid.Heights = HeightMap->GetData(); HeightGrid.CacheSize = Config.ChunkSize + 3;
+            HeightGrid.Heights = HeightMap->GetData(); HeightGrid.CacheSize = Config.ChunkSize + 5;
             FTriIDArray TempTriIDs;
 
             for (int32 lz = 0; lz < Config.MaxHeight; ++lz) {
@@ -1156,33 +1199,55 @@ float FTerrainGenConfig::GetInterpolatedHeightLocal(float LocalX, float LocalY, 
     return FMath::Lerp(FMath::Lerp(HeightGrid.GetHeight(x0, y0), HeightGrid.GetHeight(x0 + 1, y0), fx), FMath::Lerp(HeightGrid.GetHeight(x0, y0 + 1), HeightGrid.GetHeight(x0 + 1, y0 + 1), fx), fy);
 }
 
-FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const
+float FTerrainGenConfig::GetSurfaceHeightLocal(int32 LocalX, int32 LocalY, const FLocalHeightGrid& G) const
 {
-    int32 WorldX = ChunkCoord.X * ChunkSize + VertX;
-    int32 WorldY = ChunkCoord.Y * ChunkSize + VertY;
-    float FinalZ = (float)(VertZ + BedrockLevel);
+    const float H00 = G.GetHeight(LocalX, LocalY);
+    const float H10 = G.GetHeight(LocalX + 1, LocalY);
+    const float H01 = G.GetHeight(LocalX, LocalY + 1);
+    const float H11 = G.GetHeight(LocalX + 1, LocalY + 1);
+    return FMath::Min3(H00, H10, FMath::Min(H01, H11));
+}
 
-    if (!bSmoothTerrain) return FVector(WorldX, WorldY, FinalZ) * CubeSize;
+int32 FTerrainGenConfig::GetGroundLevelLocal(int32 LocalX, int32 LocalY, const FLocalHeightGrid& G) const
+{
+    return FMath::Clamp(FMath::FloorToInt(GetSurfaceHeightLocal(LocalX, LocalY, G) - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
+}
 
-    EVoxelType VoxelType = Neighborhood.GetVoxel(VoxX, VoxY, VoxZ);
-    if (VoxelType != EVoxelType::Air && VertZ > VoxZ) {
-        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) == EVoxelType::Air) {
+FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord, FCaveSmoothCache* CaveCache) const
+{
+    const int32 WorldX = ChunkCoord.X * ChunkSize + VertX;
+    const int32 WorldY = ChunkCoord.Y * ChunkSize + VertY;
+    const double BaseZ = (double)(VertZ + BedrockLevel);
 
-            float H00 = HeightGrid.GetHeight(VoxX, VoxY);
-            float H10 = HeightGrid.GetHeight(VoxX + 1, VoxY);
-            float H01 = HeightGrid.GetHeight(VoxX, VoxY + 1);
-            float H11 = HeightGrid.GetHeight(VoxX + 1, VoxY + 1);
-            float MinCorner = FMath::Min3(H00, H10, FMath::Min(H01, H11));
+    if (!bSmoothTerrain) return FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
 
-            // ExpectedGroundLevel replicates the exact generation logic for this specific voxel
-            int32 ExpectedGroundLevel = FMath::Clamp(FMath::FloorToInt(MinCorner - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
-
-            if (VoxZ == ExpectedGroundLevel) {
-                FinalZ = HeightGrid.GetHeight(VertX, VertY);
+    // --- Rule 1: top-surface displacement. Unchanged from the original. ---
+    if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) != EVoxelType::Air && VertZ > VoxZ)
+    {
+        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) == EVoxelType::Air)
+        {
+            if (VoxZ == GetGroundLevelLocal(VoxX, VoxY, HeightGrid))
+            {
+                return FVector((double)WorldX, (double)WorldY, (double)HeightGrid.GetHeight(VertX, VertY)) * CubeSize;
             }
         }
     }
-    return FVector(WorldX, WorldY, FinalZ) * CubeSize;
+
+    // --- Rule 2: cave-wall displacement. Only reached when Rule 1 declined, and the two
+    // are provably disjoint: Rule 1 fires at VertZ == ground+1, Rule 2 requires
+    // VertZ <= ground for all four adjacent columns. ---
+    if (CaveCache && CaveCache->IsReady())
+    {
+        FVector3f Off;
+        if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off))
+        {
+            return FVector((double)WorldX + (double)Off.X,
+                (double)WorldY + (double)Off.Y,
+                BaseZ + (double)Off.Z) * CubeSize;
+        }
+    }
+
+    return FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
 }
 
 FVector FTerrainGenConfig::GetSmoothNormalLocal(int32 VertX, int32 VertY, const FLocalHeightGrid& HeightGrid) const
@@ -1196,18 +1261,10 @@ float FTerrainGenConfig::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, i
     int32 GridX = FMath::RoundToInt(VertexLocalPos.X / CubeSize) - Neighborhood.SelfCoord.X * ChunkSize;
     int32 GridY = FMath::RoundToInt(VertexLocalPos.Y / CubeSize) - Neighborhood.SelfCoord.Y * ChunkSize;
 
-    auto GetExpectedGroundLevel = [&](int32 VX, int32 VY) {
-        float H00 = HeightGrid.GetHeight(VX, VY);
-        float H10 = HeightGrid.GetHeight(VX + 1, VY);
-        float H01 = HeightGrid.GetHeight(VX, VY + 1);
-        float H11 = HeightGrid.GetHeight(VX + 1, VY + 1);
-        return FMath::Clamp(FMath::FloorToInt(FMath::Min3(H00, H10, FMath::Min(H01, H11)) - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
-        };
-
     if (neighborType != EVoxelType::Air) {
         if (Neighborhood.GetVoxel(LocalX, LocalY, LocalZ + 1) != EVoxelType::Air) return FLT_MAX;
 
-        if (LocalZ == GetExpectedGroundLevel(LocalX, LocalY)) {
+        if (LocalZ == GetGroundLevelLocal(LocalX, LocalY, HeightGrid)) {
             return HeightGrid.GetHeight(GridX, GridY) * CubeSize;
         }
         return (LocalZ + 1 + BedrockLevel) * CubeSize;
@@ -1215,7 +1272,7 @@ float FTerrainGenConfig::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, i
     else {
         EVoxelType belowType = Neighborhood.GetVoxel(LocalX, LocalY, LocalZ - 1);
         if (belowType != EVoxelType::Air) {
-            if ((LocalZ - 1) == GetExpectedGroundLevel(LocalX, LocalY)) {
+            if ((LocalZ - 1) == GetGroundLevelLocal(LocalX, LocalY, HeightGrid)) {
                 return HeightGrid.GetHeight(GridX, GridY) * CubeSize;
             }
             return (LocalZ + BedrockLevel) * CubeSize;
@@ -1224,102 +1281,436 @@ float FTerrainGenConfig::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, i
     }
 }
 
-bool FTerrainGenConfig::IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const
+// ---------------------------------------------------------------------------------
+// CAVE DENSITY FIELD
+//
+// Sign-identical to the original IsInsideCave at integer coordinates, so the carved
+// voxel set is bit-for-bit what it was. Continuous in between, which is what the vertex
+// projection needs: a discontinuous field yields a discontinuous surface.
+// ---------------------------------------------------------------------------------
+float FTerrainGenConfig::GetCaveDensityAt(float WorldX, float WorldY, float WorldZ, float SurfaceHeight) const
 {
-    if (!CaveSettings.bEnableCaves) return false;
-    if (WorldZ <= BedrockLevel + CaveSettings.CaveBedrockSafetyMargin) return false;
+    if (!CaveSettings.bEnableCaves) return -1.0f;
+    if (WorldZ <= (float)BedrockLevel + (float)CaveSettings.CaveBedrockSafetyMargin) return -1.0f;
 
-    float DistBelowSurface = SurfaceHeight - (float)WorldZ;
-    if (DistBelowSurface <= 0.0f) return false;
+    const float DistBelowSurface = SurfaceHeight - WorldZ;
+    if (DistBelowSurface <= 0.0f) return -1.0f;
 
     float DepthFactor = 1.0f;
     if (DistBelowSurface < CaveSettings.CaveMaxHeightOffset)
     {
-        float EntranceNoise = FastPerlinNoise2D((float)WorldX * 0.01f + Hash2D(Seed, 120), (float)WorldY * 0.01f + Hash2D(Seed, 121)) * 0.5f + 0.5f;
-        if (EntranceNoise > (1.0f - CaveSettings.SurfaceBreakthroughLikelihood))
-        {
-            DepthFactor = 1.0f;
-        }
-        else
+        const float EntranceNoise = FastPerlinNoise2D(WorldX * 0.01f + Hash2D(Seed, 120), WorldY * 0.01f + Hash2D(Seed, 121)) * 0.5f + 0.5f;
+        if (EntranceNoise <= (1.0f - CaveSettings.SurfaceBreakthroughLikelihood))
         {
             DepthFactor = FMath::Clamp(DistBelowSurface / CaveSettings.CaveMaxHeightOffset, 0.0f, 1.0f);
             DepthFactor = DepthFactor * DepthFactor * (3.0f - 2.0f * DepthFactor);
         }
     }
+    if (DepthFactor <= 0.01f) return -1.0f;
 
-    if (DepthFactor <= 0.01f) return false;
+    const float fx = WorldX;
+    const float fy = WorldY;
+    const float fz = WorldZ;
 
-    float fx = (float)WorldX;
-    float fy = (float)WorldY;
-    float fz = (float)WorldZ;
-
-    // --- 1. Chambers (Caverns / Cheese Caves) ---
-    float ChamberMacroMask = FastPerlinNoise3D(
+    const float ChamberMacroMask = FastPerlinNoise3D(
         fx * CaveSettings.ChamberFrequencyScale + Hash3D(Seed, 131, 1),
         fy * CaveSettings.ChamberFrequencyScale + Hash3D(Seed, 132, 2),
         fz * CaveSettings.ChamberFrequencyScale * 1.2f + Hash3D(Seed, 133, 3)
     ) * 0.5f + 0.5f;
 
-    float ChamberNoise = 0.0f;
-    bool bInChamber = false;
+    const float MaskMargin = ChamberMacroMask - 0.42f;
 
-    if (ChamberMacroMask > 0.42f)
-    {
-        ChamberNoise = CalculateFBM3D(
-            fx, fy, fz * 1.3f, 2,
-            CaveSettings.ChamberNoiseScaleXZ,
-            1.0f,
-            Seed + 140
-        );
-
-        float DynamicThreshold = CaveSettings.ChamberThreshold - (ChamberMacroMask - 0.42f) * 0.45f;
-        if (ChamberNoise > DynamicThreshold)
-        {
-            bInChamber = true;
-        }
-    }
-
-    // --- 2. Tunnels (Spaghetti / Worm Caves) ---
     float RadiusBonus = 0.0f;
     if (ChamberMacroMask > 0.35f)
     {
         RadiusBonus = (ChamberMacroMask - 0.35f) * CaveSettings.TunnelChamberExpansion;
     }
+    const float EffectiveRadius = (CaveSettings.TunnelBaseRadius + RadiusBonus) * DepthFactor;
 
-    float EffectiveRadius = (CaveSettings.TunnelBaseRadius + RadiusBonus) * DepthFactor;
-    float EffectiveRadiusSq = EffectiveRadius * EffectiveRadius;
+    float Density = -1.0f;
 
-    // Primary Tunnel Worm Noise
-    float T1A = FastPerlinNoise3D(
+    // --- Tunnels. (radius - distance) has the same sign as the old DistSq < RadiusSq. ---
+    const float T1A = FastPerlinNoise3D(
         fx * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 150, 1),
         fy * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 151, 2),
-        fz * CaveSettings.TunnelNoiseScaleY + Hash3D(Seed, 152, 3)
-    );
-    float T1B = FastPerlinNoise3D(
+        fz * CaveSettings.TunnelNoiseScaleY + Hash3D(Seed, 152, 3));
+    const float T1B = FastPerlinNoise3D(
         fx * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 153, 4),
         fy * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 154, 5),
-        fz * CaveSettings.TunnelNoiseScaleY + Hash3D(Seed, 155, 6)
-    );
+        fz * CaveSettings.TunnelNoiseScaleY + Hash3D(Seed, 155, 6));
+    Density = FMath::Max(Density, EffectiveRadius - FMath::Sqrt(T1A * T1A + T1B * T1B));
 
-    float DistSq1 = T1A * T1A + T1B * T1B;
-    if (DistSq1 < EffectiveRadiusSq) return true;
-
-    // Secondary Cross-Cutting Tunnel
-    float T2A = FastPerlinNoise3D(
+    const float T2A = FastPerlinNoise3D(
         (fx + 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 160, 1),
         (fy + 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 161, 2),
-        fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 162, 3)
-    );
-    float T2B = FastPerlinNoise3D(
+        fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 162, 3));
+    const float T2B = FastPerlinNoise3D(
         (fx - 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 163, 4),
         (fy - 500.0f) * (CaveSettings.TunnelNoiseScaleXZ * 1.15f) + Hash3D(Seed, 164, 5),
-        fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 165, 6)
-    );
+        fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 165, 6));
+    Density = FMath::Max(Density, EffectiveRadius - FMath::Sqrt(T2A * T2A + T2B * T2B));
 
-    float DistSq2 = T2A * T2A + T2B * T2B;
-    if (DistSq2 < EffectiveRadiusSq) return true;
+    // --- Chambers. min(a,b) > 0 is true exactly when a > 0 AND b > 0, so this is
+    // sign-identical to the old "mask gate, then threshold test" pair, but continuous.
+    // The old hard gate made the field jump by up to 0.48 across the mask contour.
+    // The chamber term can never exceed MaskMargin, so skipping it when a tunnel already
+    // beats it is exact, not an approximation. ---
+    if (MaskMargin > Density)
+    {
+        const float ChamberNoise = CalculateFBM3D(
+            fx, fy, fz * 1.3f, 2,
+            CaveSettings.ChamberNoiseScaleXZ,
+            1.0f,
+            Seed + 140);
 
-    return bInChamber;
+        const float DynamicThreshold = CaveSettings.ChamberThreshold - FMath::Max(0.0f, MaskMargin) * 0.45f;
+        Density = FMath::Max(Density, FMath::Min(MaskMargin, ChamberNoise - DynamicThreshold));
+    }
+
+    return Density;
+}
+
+// Voxel (l) is carved when the field sampled AT l is positive, but that voxel occupies
+// the cube [l, l+1]. So the solid boundary the player sees sits half a voxel positive of
+// the field's zero set on every axis. Undoing that shift here is what keeps the required
+// vertex offsets small: without it the projection asks for roughly -0.5 on every axis
+// everywhere and just translates the staircase instead of smoothing it.
+float FTerrainGenConfig::GetCaveSmoothFieldAt(float VX, float VY, float VZ, float SurfaceHeight) const
+{
+    return GetCaveDensityAt(VX - 0.5f, VY - 0.5f, VZ - 0.5f, SurfaceHeight);
+}
+
+float FTerrainGenConfig::GetCaveDensity(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const
+{
+    return GetCaveDensityAt((float)WorldX, (float)WorldY, (float)WorldZ, SurfaceHeight);
+}
+
+bool FTerrainGenConfig::IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const
+{
+    return GetCaveDensity(WorldX, WorldY, WorldZ, SurfaceHeight) > 0.0f;
+}
+
+// ---------------------------------------------------------------------------------
+// FCaveSmoothCache
+// ---------------------------------------------------------------------------------
+void FCaveSmoothCache::Init(const FTerrainGenConfig* InConfig, const FLocalHeightGrid* InHeights,
+    const FChunkNeighborhood* InNeighborhood, const FIntVector& InChunkCoord)
+{
+    Config = InConfig;
+    Heights = InHeights;
+    Neighborhood = InNeighborhood;
+    ChunkCoord = InChunkCoord;
+    bReady = false;
+
+    if (!Config || !Heights || !Heights->Heights || !Neighborhood) return;
+    if (!Config->bSmoothTerrain) return;
+    if (!Config->CaveSettings.bEnableCaves || !Config->CaveSettings.bSmoothCaves) return;
+
+    CS = Config->ChunkSize;
+    CellW = CS + 4;
+    BaseW = CS + 3;
+    VertW = CS + 1;
+
+    CellSlabZ.Init(MIN_int32, SLAB_COUNT);
+    CellDensityCache.SetNumUninitialized(CellW * CellW * SLAB_COUNT);
+    CellValid.SetNumZeroed(CellW * CellW * SLAB_COUNT);
+
+    BaseSlabZ.Init(MIN_int32, SLAB_COUNT);
+    BaseOffsetCache.SetNumUninitialized(BaseW * BaseW * SLAB_COUNT);
+    BaseState.SetNumZeroed(BaseW * BaseW * SLAB_COUNT);
+
+    VertSlabZ.Init(MIN_int32, SLAB_COUNT);
+    VertOffsetCache.SetNumUninitialized(VertW * VertW * SLAB_COUNT);
+    VertState.SetNumZeroed(VertW * VertW * SLAB_COUNT);
+
+    bReady = true;
+}
+
+float FCaveSmoothCache::GetCellDensity(int32 cx, int32 cy, int32 cz)
+{
+    // cz <= 0 is solid: the carve pass in GenerateChunkData starts at lz 1, so voxel 0
+    // is never removed and the mesher has to agree with it.
+    if (cz <= 0 || cz >= Config->MaxHeight) return -1.0f;
+    if (cx < -2 || cx > CS + 1 || cy < -2 || cy > CS + 1) return -1.0f;
+
+    const int32 S = cz & (SLAB_COUNT - 1);
+    const int32 Plane = CellW * CellW;
+    if (CellSlabZ[S] != cz)
+    {
+        CellSlabZ[S] = cz;
+        FMemory::Memzero(CellValid.GetData() + S * Plane, Plane);
+    }
+
+    const int32 I = S * Plane + (cx + 2) + (cy + 2) * CellW;
+    if (CellValid[I]) return CellDensityCache[I];
+
+    const float SurfaceHeight = Config->GetSurfaceHeightLocal(cx, cy, *Heights);
+    const float D = Config->GetCaveDensity(
+        ChunkCoord.X * CS + cx,
+        ChunkCoord.Y * CS + cy,
+        cz + Config->BedrockLevel,
+        SurfaceHeight);
+
+    CellDensityCache[I] = D;
+    CellValid[I] = 1;
+    return D;
+}
+
+// The voxel state generation WOULD have produced for this cell, from the field alone.
+bool FCaveSmoothCache::IsCellExpectedAir(int32 cx, int32 cy, int32 cz)
+{
+    if (cz <= 0) return false;
+    if (cz >= Config->MaxHeight) return true;
+    if (cz > Config->GetGroundLevelLocal(cx, cy, *Heights)) return true;
+    return GetCellDensity(cx, cy, cz) > 0.0f;
+}
+
+float FCaveSmoothCache::VertexSurfaceHeight(int32 vx, int32 vy) const
+{
+    return FMath::Min(
+        FMath::Min(Config->GetSurfaceHeightLocal(vx - 1, vy - 1, *Heights),
+            Config->GetSurfaceHeightLocal(vx, vy - 1, *Heights)),
+        FMath::Min(Config->GetSurfaceHeightLocal(vx - 1, vy, *Heights),
+            Config->GetSurfaceHeightLocal(vx, vy, *Heights)));
+}
+
+// Stage 1: surface-nets crossing centroid. Procedural only - reads no voxel data, so it
+// is safe for a relaxation neighbour to call this across an edited region.
+bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
+{
+    if (vx < -1 || vx > CS + 1 || vy < -1 || vy > CS + 1) return false;
+    if (vz < 1 || vz >= Config->MaxHeight) return false;
+
+    const int32 S = vz & (SLAB_COUNT - 1);
+    const int32 Plane = BaseW * BaseW;
+    if (BaseSlabZ[S] != vz)
+    {
+        BaseSlabZ[S] = vz;
+        FMemory::Memzero(BaseState.GetData() + S * Plane, Plane);
+    }
+
+    const int32 I = S * Plane + (vx + 1) + (vy + 1) * BaseW;
+    if (BaseState[I] == 1) return false;
+    if (BaseState[I] == 2) { OutOffset = BaseOffsetCache[I]; return true; }
+
+    BaseState[I] = 1;
+
+    // Ground gate: stay strictly below the band the height-field rule owns. Inside this
+    // gate all 8 cells are at or below their column's ground level, which is what makes
+    // "density > 0" and "expected air" the same predicate below.
+    for (int32 dy = -1; dy <= 0; ++dy)
+        for (int32 dx = -1; dx <= 0; ++dx)
+            if (vz > Config->GetGroundLevelLocal(vx + dx, vy + dy, *Heights)) return false;
+
+    // Corner c: bit0 = x, bit1 = y, bit2 = z. Sample position is the voxel index.
+    float d[8];
+    bool bAir = false, bSolid = false;
+    for (int32 c = 0; c < 8; ++c)
+    {
+        const int32 cx = vx - 1 + (c & 1);
+        const int32 cy = vy - 1 + ((c >> 1) & 1);
+        const int32 cz = vz - 1 + ((c >> 2) & 1);
+        d[c] = GetCellDensity(cx, cy, cz);
+        if (d[c] > 0.0f) bAir = true; else bSolid = true;
+    }
+    if (!bAir || !bSolid) return false;
+
+    static const int32 E[12][2] = {
+        {0,1},{2,3},{4,5},{6,7},      // X edges
+        {0,2},{1,3},{4,6},{5,7},      // Y edges
+        {0,4},{1,5},{2,6},{3,7}       // Z edges
+    };
+
+    FVector3f Sum(0.0f, 0.0f, 0.0f);
+    int32 N = 0;
+    for (int32 e = 0; e < 12; ++e)
+    {
+        const int32 a = E[e][0], b = E[e][1];
+        const bool bAirA = d[a] > 0.0f;
+        const bool bAirB = d[b] > 0.0f;
+        if (bAirA == bAirB) continue;
+
+        const float Denom = d[a] - d[b];
+        const float t = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : d[a] / Denom, 0.0f, 1.0f);
+
+        const FVector3f Pa((float)(vx - 1 + (a & 1)), (float)(vy - 1 + ((a >> 1) & 1)), (float)(vz - 1 + ((a >> 2) & 1)));
+        const FVector3f Pb((float)(vx - 1 + (b & 1)), (float)(vy - 1 + ((b >> 1) & 1)), (float)(vz - 1 + ((b >> 2) & 1)));
+        Sum += Pa + (Pb - Pa) * t;
+        ++N;
+    }
+    if (N == 0) return false;
+
+    // The centroid lies in [v-1, v] per axis in sample space. Voxel l occupies [l, l+1]
+    // in render space, so sample -> render is a +0.5 shift, putting the result in
+    // [v-0.5, v+0.5]. That bound is structural here, not enforced by a clamp - which is
+    // exactly why this cannot saturate the way gradient projection did.
+    const FVector3f C = Sum / (float)N;
+    OutOffset = FVector3f(C.X + 0.5f - (float)vx,
+        C.Y + 0.5f - (float)vy,
+        C.Z + 0.5f - (float)vz);
+
+    BaseOffsetCache[I] = OutOffset;
+    BaseState[I] = 2;
+    return true;
+}
+
+bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
+{
+    if (!bReady) return false;
+    if (vx < 0 || vx > CS || vy < 0 || vy > CS) return false;
+    if (vz < 1 || vz >= Config->MaxHeight) return false;
+
+    const int32 S = vz & (SLAB_COUNT - 1);
+    const int32 Plane = VertW * VertW;
+    if (VertSlabZ[S] != vz)
+    {
+        VertSlabZ[S] = vz;
+        FMemory::Memzero(VertState.GetData() + S * Plane, Plane);
+    }
+
+    const int32 I = S * Plane + vx + vy * VertW;
+    if (VertState[I] == 1) return false;
+    if (VertState[I] == 2) { OutOffset = VertOffsetCache[I]; return true; }
+
+    VertState[I] = 1;   // pessimistic default; every early-out below leaves it here
+
+    // Stage 1 (also applies the ground gate and the sign-change test).
+    FVector3f Base;
+    if (!GetBaseOffset(vx, vy, vz, Base)) return false;
+
+    // Cheap wall test on the ACTUAL voxels, before the pristine test.
+    bool bAir = false, bSolid = false;
+    for (int32 dz = -1; dz <= 0; ++dz)
+        for (int32 dy = -1; dy <= 0; ++dy)
+            for (int32 dx = -1; dx <= 0; ++dx)
+            {
+                if (Neighborhood->GetVoxel(vx + dx, vy + dy, vz + dz) == EVoxelType::Air) bAir = true;
+                else bSolid = true;
+            }
+    if (!bAir || !bSolid) return false;
+
+    // Pristine test: all 8 voxels touching this vertex must still match what generation
+    // would produce. This is the exact analogue of the top-surface rule's
+    // "VoxZ == ExpectedGroundLevel" condition, and it is what makes player edits come
+    // out as clean cubes: touch any of the 8 and the vertex snaps back to the lattice.
+    // Because the test reads the same 8 voxels no matter which face is asking, every
+    // face still agrees on the result, so no cracks open.
+    for (int32 dz = -1; dz <= 0; ++dz)
+        for (int32 dy = -1; dy <= 0; ++dy)
+            for (int32 dx = -1; dx <= 0; ++dx)
+            {
+                const int32 cx = vx + dx, cy = vy + dy, cz = vz + dz;
+                const bool bActualAir = (Neighborhood->GetVoxel(cx, cy, cz) == EVoxelType::Air);
+                if (bActualAir != IsCellExpectedAir(cx, cy, cz)) return false;
+            }
+
+    const FVector3f Origin(
+        (float)(ChunkCoord.X * CS + vx),
+        (float)(ChunkCoord.Y * CS + vy),
+        (float)(vz + Config->BedrockLevel));
+
+    FVector3f P = Origin + Base;
+
+    // Stage 2: one Laplacian pass over the 6 axis neighbours. This is where the
+    // tangential smoothing comes from - stage 1 alone leaves every vertex pinned to its
+    // own cell and the surface still reads as facets. Neighbour positions come from the
+    // procedural field only, so two chunks compute the same value for a shared vertex.
+    const float Lambda = FMath::Clamp(Config->CaveSettings.SmoothRelaxation, 0.0f, 1.0f);
+    if (Lambda > 0.0f)
+    {
+        static const FIntVector NB[6] = {
+            FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
+            FIntVector(0, -1, 0), FIntVector(0, 1, 0),
+            FIntVector(0, 0, -1), FIntVector(0, 0, 1)
+        };
+
+        FVector3f Sum(0.0f, 0.0f, 0.0f);
+        int32 Count = 0;
+        for (int32 n = 0; n < 6; ++n)
+        {
+            const int32 nx = vx + NB[n].X, ny = vy + NB[n].Y, nz = vz + NB[n].Z;
+            FVector3f NOff;
+            if (!GetBaseOffset(nx, ny, nz, NOff)) continue;
+            Sum += FVector3f((float)(ChunkCoord.X * CS + nx),
+                (float)(ChunkCoord.Y * CS + ny),
+                (float)(nz + Config->BedrockLevel)) + NOff;
+            ++Count;
+        }
+
+        // Two or more: averaging toward a single neighbour just drags the vertex at a
+        // surface rim instead of smoothing it.
+        if (Count > 0)
+        {
+            const FVector3f Avg = Sum / (float)Count;
+            // Weight by how complete the ring is. A vertex on a rim or a thin feature
+            // has only 2 or 3 surface neighbours, and averaging toward their midpoint at
+            // full strength drags it well off its own cell, which is what turns its
+            // quads into long slivers. Full strength only where the ring is full.
+            const float W = Lambda * ((float)Count / 6.0f);
+            P = P + (Avg - P) * W;
+        }
+    }
+
+    // Stage 3: Newton polish. Relaxation pulls slightly off the surface along the
+    // normal; this puts it back without disturbing the tangential spread.
+    const int32 Iterations = FMath::Clamp(Config->CaveSettings.SmoothIterations, 0, 4);
+    if (Iterations > 0)
+    {
+        const float SurfaceHeight = VertexSurfaceHeight(vx, vy);
+
+        // Tetrahedral offsets: sum(K_k * D(P + K_k*h)) == 4h * grad(D) for a linear
+        // field, so one 4-sample pass gives both the value and the gradient.
+        static const FVector3f K[4] = {
+            FVector3f(1.0f, -1.0f, -1.0f),
+            FVector3f(-1.0f, -1.0f,  1.0f),
+            FVector3f(-1.0f,  1.0f, -1.0f),
+            FVector3f(1.0f,  1.0f,  1.0f)
+        };
+        const float H = 0.35f;
+
+        for (int32 Iter = 0; Iter < Iterations; ++Iter)
+        {
+            float Dk[4];
+            FVector3f GRaw(0.0f, 0.0f, 0.0f);
+            for (int32 k = 0; k < 4; ++k)
+            {
+                const FVector3f Q = P + K[k] * H;
+                Dk[k] = Config->GetCaveSmoothFieldAt(Q.X, Q.Y, Q.Z, SurfaceHeight);
+                GRaw += K[k] * Dk[k];
+            }
+
+            const float Val = (Dk[0] + Dk[1] + Dk[2] + Dk[3]) * 0.25f;
+            const float L2 = GRaw.SizeSquared();
+            if (L2 < 1e-12f) break;
+
+            // grad = GRaw / (4H), so -Val*grad/|grad|^2 collapses to this:
+            FVector3f Step = GRaw * (-Val * 4.0f * H / L2);
+
+            // Limit by MAGNITUDE, never per axis. A per-axis limit shortens one
+            // component and leaves the others, which rotates the step: neighbouring
+            // vertices then bend in different directions and the quads between them
+            // turn into slivers.
+            const float Len = Step.Size();
+            if (Len > 0.3f) Step *= (0.3f / Len);
+            P += Step;
+
+            if (Len < 1e-4f) break;
+        }
+    }
+
+    FVector3f Off = P - Origin;
+    if (!FMath::IsFinite(Off.X) || !FMath::IsFinite(Off.Y) || !FMath::IsFinite(Off.Z)) return false;
+
+    // Safety net only. Stage 1 is structurally inside +/-0.5; stages 2 and 3 can nudge
+    // past it, and a vertex leaving its own cell could cross its neighbour and fold the
+    // mesh. Scale uniformly so the direction survives.
+    const float MaxComp = FMath::Max3(FMath::Abs(Off.X), FMath::Abs(Off.Y), FMath::Abs(Off.Z));
+    if (MaxComp > 0.5f) Off *= (0.5f / MaxComp);
+
+    VertOffsetCache[I] = Off;
+    VertState[I] = 2;
+    OutOffset = Off;
+    return true;
 }
 
 FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const
@@ -1331,7 +1722,7 @@ FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos
     return FLinearColor::White;
 }
 
-void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const
+void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord, FCaveSmoothCache* CaveCache) const
 {
     FDynamicMeshAttributeSet* Attr = Mesh.Attributes();
     if (!Attr) return;
@@ -1345,24 +1736,24 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
     int32 WorldY = ChunkCoord.Y * ChunkSize + ly;
     int32 WorldZ = lz + BedrockLevel;
 
-    FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)WorldZ * CubeSize), CurrentType);
-    int32 cIdx = ColorOverlay->AppendElement(FVector4f(VoxelColor));
-
     int32 TopMatID = 1, BottomMatID = 1, SideMatID = 1;
     if (CurrentType == EVoxelType::Grass) { TopMatID = 0; BottomMatID = SideMatID = 1; }
     else if (CurrentType == EVoxelType::Dirt) { TopMatID = BottomMatID = SideMatID = 1; }
     else if (CurrentType == EVoxelType::Stone) { TopMatID = BottomMatID = SideMatID = 2; }
 
+    const bool bAirTop = Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air;
+    const bool bAirBottom = Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air;
+    const bool bAirEast = Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air;
+    const bool bAirWest = Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air;
+    const bool bAirNorth = Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air;
+    const bool bAirSouth = Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air;
+
     if (!bSmoothTerrain)
     {
-        bool bExposedTop = Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air;
-        bool bExposedBottom = Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air;
-        bool bExposedEast = Neighborhood.GetVoxel(lx + 1, ly, lz) == EVoxelType::Air;
-        bool bExposedWest = Neighborhood.GetVoxel(lx - 1, ly, lz) == EVoxelType::Air;
-        bool bExposedNorth = Neighborhood.GetVoxel(lx, ly + 1, lz) == EVoxelType::Air;
-        bool bExposedSouth = Neighborhood.GetVoxel(lx, ly - 1, lz) == EVoxelType::Air;
+        if (!bAirTop && !bAirBottom && !bAirEast && !bAirWest && !bAirNorth && !bAirSouth) return;
 
-        if (!bExposedTop && !bExposedBottom && !bExposedEast && !bExposedWest && !bExposedNorth && !bExposedSouth) return;
+        FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)WorldZ * CubeSize), CurrentType);
+        int32 cIdx = ColorOverlay->AppendElement(FVector4f(VoxelColor));
 
         FVector Origin((double)WorldX * CubeSize, (double)WorldY * CubeSize, (double)WorldZ * CubeSize);
         FVector p000 = Origin, p100 = Origin + FVector(CubeSize, 0, 0), p010 = Origin + FVector(0, CubeSize, 0), p110 = Origin + FVector(CubeSize, CubeSize, 0);
@@ -1396,66 +1787,99 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 }
             };
 
-        if (bExposedTop) AddQuadWorldFast(p001, p101, p111, p011, FVector3f(0.f, 0.f, 1.f), TopMatID, 0, 1);
-        if (bExposedBottom) AddQuadWorldFast(p100, p000, p010, p110, FVector3f(0.f, 0.f, -1.f), BottomMatID, 0, 1);
-        if (bExposedEast) AddQuadWorldFast(p100, p110, p111, p101, FVector3f(1.f, 0.f, 0.f), SideMatID, 1, 2);
-        if (bExposedWest) AddQuadWorldFast(p010, p000, p001, p011, FVector3f(-1.f, 0.f, 0.f), SideMatID, 1, 2);
-        if (bExposedNorth) AddQuadWorldFast(p110, p010, p011, p111, FVector3f(0.f, 1.f, 0.f), SideMatID, 0, 2);
-        if (bExposedSouth) AddQuadWorldFast(p000, p100, p101, p001, FVector3f(0.f, -1.f, 0.f), SideMatID, 0, 2);
+        if (bAirTop) AddQuadWorldFast(p001, p101, p111, p011, FVector3f(0.f, 0.f, 1.f), TopMatID, 0, 1);
+        if (bAirBottom) AddQuadWorldFast(p100, p000, p010, p110, FVector3f(0.f, 0.f, -1.f), BottomMatID, 0, 1);
+        if (bAirEast) AddQuadWorldFast(p100, p110, p111, p101, FVector3f(1.f, 0.f, 0.f), SideMatID, 1, 2);
+        if (bAirWest) AddQuadWorldFast(p010, p000, p001, p011, FVector3f(-1.f, 0.f, 0.f), SideMatID, 1, 2);
+        if (bAirNorth) AddQuadWorldFast(p110, p010, p011, p111, FVector3f(0.f, 1.f, 0.f), SideMatID, 0, 2);
+        if (bAirSouth) AddQuadWorldFast(p000, p100, p101, p001, FVector3f(0.f, -1.f, 0.f), SideMatID, 0, 2);
     }
     else
     {
-        FVector v000 = GetSmoothVertexLocal(lx, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v100 = GetSmoothVertexLocal(lx + 1, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v010 = GetSmoothVertexLocal(lx, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v110 = GetSmoothVertexLocal(lx + 1, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v001 = GetSmoothVertexLocal(lx, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v101 = GetSmoothVertexLocal(lx + 1, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v011 = GetSmoothVertexLocal(lx, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
-        FVector v111 = GetSmoothVertexLocal(lx + 1, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord);
+        const int32 GroundHere = GetGroundLevelLocal(lx, ly, HeightGrid);
+        const int32 GroundEast = GetGroundLevelLocal(lx + 1, ly, HeightGrid);
+        const int32 GroundWest = GetGroundLevelLocal(lx - 1, ly, HeightGrid);
+        const int32 GroundNorth = GetGroundLevelLocal(lx, ly + 1, HeightGrid);
+        const int32 GroundSouth = GetGroundLevelLocal(lx, ly - 1, HeightGrid);
+
+        // Fully buried and fully underground: no face can possibly be emitted, and the
+        // cliff test cannot fire either. Skipping here is what keeps solid rock cheap.
+        if (!bAirTop && !bAirBottom && !bAirEast && !bAirWest && !bAirNorth && !bAirSouth &&
+            lz <= GroundEast && lz <= GroundWest && lz <= GroundNorth && lz <= GroundSouth)
+        {
+            return;
+        }
+
+        FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)WorldZ * CubeSize), CurrentType);
+        int32 cIdx = ColorOverlay->AppendElement(FVector4f(VoxelColor));
+
+        FVector v000 = GetSmoothVertexLocal(lx, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v100 = GetSmoothVertexLocal(lx + 1, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v010 = GetSmoothVertexLocal(lx, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v110 = GetSmoothVertexLocal(lx + 1, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v001 = GetSmoothVertexLocal(lx, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v101 = GetSmoothVertexLocal(lx + 1, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v011 = GetSmoothVertexLocal(lx, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        FVector v111 = GetSmoothVertexLocal(lx + 1, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
 
         float LocalTextureScale = TextureScale; float LocalCubeSize = CubeSize;
-        auto ComputeTriangleNormal = [](const FVector& A, const FVector& B, const FVector& C) -> FVector { return FVector::CrossProduct(C - A, B - A).GetSafeNormal(); };
-        auto AddQuadWorldSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, int32 MatID, int32 UAxis, int32 VAxis)
+
+        // Slivers below this go. The collapse mechanism depends on redundant quads
+     // shrinking to nothing, so some threshold is required; too low leaves hairline
+     // triangles (what you were seeing), too high leaves a hairline gap where a quad
+     // had not quite finished collapsing. 0.01 drops triangles under ~0.5% of a face.
+        const double MinCross = 0.01 * (double)LocalCubeSize * (double)LocalCubeSize;
+
+        auto AddQuadWorldSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D,
+            int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
             {
-                FVector2D uvA((float)A[UAxis] / LocalCubeSize * LocalTextureScale, (float)A[VAxis] / LocalCubeSize * LocalTextureScale);
-                FVector2D uvB((float)B[UAxis] / LocalCubeSize * LocalTextureScale, (float)B[VAxis] / LocalCubeSize * LocalTextureScale);
-                FVector2D uvC((float)C[UAxis] / LocalCubeSize * LocalTextureScale, (float)C[VAxis] / LocalCubeSize * LocalTextureScale);
-                FVector2D uvD((float)D[UAxis] / LocalCubeSize * LocalTextureScale, (float)D[VAxis] / LocalCubeSize * LocalTextureScale);
+                // The diagonal is fixed in LATTICE space: always the corner with the
+                // smallest in-plane index to the one with the largest. Two quads meeting
+                // along an edge then split the same way even when they came from faces of
+                // different orientation. bDiagBD is false where the caller's winding
+                // starts at the min corner (top, east, south) and true where it does not
+                // (bottom, west, north).
+                const FVector* Tri[2][3];
+                if (!bDiagBD) { Tri[0][0] = &A; Tri[0][1] = &B; Tri[0][2] = &C;  Tri[1][0] = &A; Tri[1][1] = &C; Tri[1][2] = &D; }
+                else { Tri[0][0] = &B; Tri[0][1] = &C; Tri[0][2] = &D;  Tri[1][0] = &B; Tri[1][1] = &D; Tri[1][2] = &A; }
 
-                int32 vA = Mesh.AppendVertex(FVector3d(A)), vB = Mesh.AppendVertex(FVector3d(B));
-                int32 vC = Mesh.AppendVertex(FVector3d(C)), vD = Mesh.AppendVertex(FVector3d(D));
+                auto UVOf = [&](const FVector& P) {
+                    return FVector2f((float)P[UAxis] / LocalCubeSize * LocalTextureScale,
+                        (float)P[VAxis] / LocalCubeSize * LocalTextureScale);
+                    };
 
-                FVector n1 = ComputeTriangleNormal(A, B, C);
-                int32 t1 = Mesh.AppendTriangle(vA, vB, vC);
-                if (t1 != FDynamicMesh3::InvalidID) {
-                    OutTriIDs.Add(t1);
-                    int32 nA1 = NormalOverlay->AppendElement(FVector3f(n1)), nB1 = NormalOverlay->AppendElement(FVector3f(n1)), nC1 = NormalOverlay->AppendElement(FVector3f(n1));
-                    NormalOverlay->SetTriangle(t1, FIndex3i(nA1, nB1, nC1));
-                    UVOverlay->SetTriangle(t1, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvB)), UVOverlay->AppendElement(FVector2f(uvC))));
-                    ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
-                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
-                }
-                FVector n2 = ComputeTriangleNormal(A, C, D);
-                int32 t2 = Mesh.AppendTriangle(vA, vC, vD);
-                if (t2 != FDynamicMesh3::InvalidID) {
-                    OutTriIDs.Add(t2);
-                    int32 nA2 = NormalOverlay->AppendElement(FVector3f(n2)), nC2 = NormalOverlay->AppendElement(FVector3f(n2)), nD2 = NormalOverlay->AppendElement(FVector3f(n2));
-                    NormalOverlay->SetTriangle(t2, FIndex3i(nA2, nC2, nD2));
-                    UVOverlay->SetTriangle(t2, FIndex3i(UVOverlay->AppendElement(FVector2f(uvA)), UVOverlay->AppendElement(FVector2f(uvC)), UVOverlay->AppendElement(FVector2f(uvD))));
-                    ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
-                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
+                for (int32 i = 0; i < 2; ++i)
+                {
+                    const FVector& P0 = *Tri[i][0];
+                    const FVector& P1 = *Tri[i][1];
+                    const FVector& P2 = *Tri[i][2];
+
+                    const FVector X = FVector::CrossProduct(P2 - P0, P1 - P0);
+                    if (X.Size() <= MinCross) continue;
+
+                    const int32 i0 = Mesh.AppendVertex(FVector3d(P0));
+                    const int32 i1 = Mesh.AppendVertex(FVector3d(P1));
+                    const int32 i2 = Mesh.AppendVertex(FVector3d(P2));
+                    const int32 t = Mesh.AppendTriangle(i0, i1, i2);
+                    if (t == FDynamicMesh3::InvalidID) continue;
+
+                    OutTriIDs.Add(t);
+                    const FVector3f N(X.GetSafeNormal());
+                    NormalOverlay->SetTriangle(t, FIndex3i(
+                        NormalOverlay->AppendElement(N),
+                        NormalOverlay->AppendElement(N),
+                        NormalOverlay->AppendElement(N)));
+                    UVOverlay->SetTriangle(t, FIndex3i(
+                        UVOverlay->AppendElement(UVOf(P0)),
+                        UVOverlay->AppendElement(UVOf(P1)),
+                        UVOverlay->AppendElement(UVOf(P2))));
+                    ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
+                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
                 }
             };
 
-        if (Neighborhood.GetVoxel(lx, ly, lz + 1) == EVoxelType::Air)
-        {
-            FVector n00 = GetSmoothNormalLocal(lx, ly, HeightGrid);
-            FVector n10 = GetSmoothNormalLocal(lx + 1, ly, HeightGrid);
-            FVector n01 = GetSmoothNormalLocal(lx, ly + 1, HeightGrid);
-            FVector n11 = GetSmoothNormalLocal(lx + 1, ly + 1, HeightGrid);
-
-            auto AddTopQuadSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector& nA, const FVector& nB, const FVector& nC, const FVector& nD, int32 MatID) {
+        auto AddTopQuadSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector& nA, const FVector& nB, const FVector& nC, const FVector& nD, int32 MatID)
+            {
                 FVector2D uvA((float)A.X / LocalCubeSize * LocalTextureScale, (float)A.Y / LocalCubeSize * LocalTextureScale);
                 FVector2D uvB((float)B.X / LocalCubeSize * LocalTextureScale, (float)B.Y / LocalCubeSize * LocalTextureScale);
                 FVector2D uvC((float)C.X / LocalCubeSize * LocalTextureScale, (float)C.Y / LocalCubeSize * LocalTextureScale);
@@ -1480,36 +1904,55 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                     ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
                     if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
                 }
-                };
-            AddTopQuadSmooth(v001, v011, v111, v101, n00, n01, n11, n10, TopMatID);
+            };
+
+        // ---- TOP (+Z) ----
+        if (bAirTop)
+        {
+            if (lz == GroundHere)
+            {
+                // The real sky-facing surface: keeps its height-gradient normals.
+                FVector n00 = GetSmoothNormalLocal(lx, ly, HeightGrid);
+                FVector n10 = GetSmoothNormalLocal(lx + 1, ly, HeightGrid);
+                FVector n01 = GetSmoothNormalLocal(lx, ly + 1, HeightGrid);
+                FVector n11 = GetSmoothNormalLocal(lx + 1, ly + 1, HeightGrid);
+                AddTopQuadSmooth(v001, v011, v111, v101, n00, n01, n11, n10, TopMatID);
+            }
+            else
+            {
+                // A cave floor. Height-field normals are meaningless here, so it goes
+                // through the ordinary geometric-normal path like every other face.
+                AddQuadWorldSmooth(v001, v011, v111, v101, TopMatID, 0, 1, false);
+            }
         }
 
-        if (Neighborhood.GetVoxel(lx, ly, lz - 1) == EVoxelType::Air) AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1);
+        // ---- BOTTOM (-Z) ----
+        if (bAirBottom) AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1, true);
 
         const float ZOffsetEpsilon = 0.1f;
-        if (GetNeighborTopHeightLocal(lx + 1, ly, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v101, Neighborhood, HeightGrid) < v101.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v111, Neighborhood, HeightGrid) < v111.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx + 1, ly, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon)
-            AddQuadWorldSmooth(v100, v101, v111, v110, SideMatID, 1, 2);
 
-        if (GetNeighborTopHeightLocal(lx - 1, ly, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v011, Neighborhood, HeightGrid) < v011.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v001, Neighborhood, HeightGrid) < v001.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx - 1, ly, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon)
-            AddQuadWorldSmooth(v010, v011, v001, v000, SideMatID, 1, 2);
+        auto EmitSide = [&](int32 nx, int32 ny, bool bNeighborAir, int32 NeighborGround,
+            const FVector& A, const FVector& B, const FVector& C, const FVector& D,
+            int32 UAxis, int32 VAxis, bool bDiagBD)
+            {
+                if (lz <= NeighborGround)
+                {
+                    if (bNeighborAir) AddQuadWorldSmooth(A, B, C, D, SideMatID, UAxis, VAxis, bDiagBD);
+                    return;
+                }
+                if (GetNeighborTopHeightLocal(nx, ny, lz, A, Neighborhood, HeightGrid) < A.Z - ZOffsetEpsilon ||
+                    GetNeighborTopHeightLocal(nx, ny, lz, B, Neighborhood, HeightGrid) < B.Z - ZOffsetEpsilon ||
+                    GetNeighborTopHeightLocal(nx, ny, lz, C, Neighborhood, HeightGrid) < C.Z - ZOffsetEpsilon ||
+                    GetNeighborTopHeightLocal(nx, ny, lz, D, Neighborhood, HeightGrid) < D.Z - ZOffsetEpsilon)
+                {
+                    AddQuadWorldSmooth(A, B, C, D, SideMatID, UAxis, VAxis, bDiagBD);
+                }
+            };
 
-        if (GetNeighborTopHeightLocal(lx, ly + 1, lz, v110, Neighborhood, HeightGrid) < v110.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v111, Neighborhood, HeightGrid) < v111.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v011, Neighborhood, HeightGrid) < v011.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly + 1, lz, v010, Neighborhood, HeightGrid) < v010.Z - ZOffsetEpsilon)
-            AddQuadWorldSmooth(v110, v111, v011, v010, SideMatID, 0, 2);
-
-        if (GetNeighborTopHeightLocal(lx, ly - 1, lz, v000, Neighborhood, HeightGrid) < v000.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v001, Neighborhood, HeightGrid) < v001.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v101, Neighborhood, HeightGrid) < v101.Z - ZOffsetEpsilon ||
-            GetNeighborTopHeightLocal(lx, ly - 1, lz, v100, Neighborhood, HeightGrid) < v100.Z - ZOffsetEpsilon)
-            AddQuadWorldSmooth(v000, v001, v101, v100, SideMatID, 0, 2);
+        EmitSide(lx + 1, ly, bAirEast, GroundEast, v100, v101, v111, v110, 1, 2, false);
+        EmitSide(lx - 1, ly, bAirWest, GroundWest, v010, v011, v001, v000, 1, 2, true);
+        EmitSide(lx, ly + 1, bAirNorth, GroundNorth, v110, v111, v011, v010, 0, 2, true);
+        EmitSide(lx, ly - 1, bAirSouth, GroundSouth, v000, v001, v101, v100, 0, 2, false);
     }
 }
 
@@ -1547,13 +1990,7 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
         FVector GroundNormal(0.f, 0.f, 1.f);
 
         if (bSmoothTerrain) {
-            float H00 = HeightGrid.GetHeight(lx, ly);
-            float H10 = HeightGrid.GetHeight(lx + 1, ly);
-            float H01 = HeightGrid.GetHeight(lx, ly + 1);
-            float H11 = HeightGrid.GetHeight(lx + 1, ly + 1);
-            int32 ExpectedGroundLevel = FMath::Clamp(FMath::FloorToInt(FMath::Min3(H00, H10, FMath::Min(H01, H11)) - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
-
-            if (lz == ExpectedGroundLevel) {
+            if (lz == GetGroundLevelLocal(lx, ly, HeightGrid)) {
                 BladeWorldZ = GetInterpolatedHeightLocal(BladeLocalX, BladeLocalY, HeightGrid) * CubeSize;
                 GroundNormal = GetSmoothNormalLocal(FMath::RoundToInt(BladeLocalX), FMath::RoundToInt(BladeLocalY), HeightGrid);
             }
@@ -1648,6 +2085,11 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
             FDynamicMeshAttributeSet* GrassAttr = GrassMeshOut ? GrassMeshOut->Attributes() : nullptr;
             if (GrassAttr && GrassAttr->NumUVLayers() < 2) GrassAttr->SetNumUVLayers(2);
 
+            // The 3x3x3 block is exactly the set of voxels that share at least one corner
+            // with the edited voxel, i.e. every voxel whose geometry the pristine test can
+            // possibly change. The relaxation pass reads further out than that, but only
+            // from the procedural field, never from voxel data - so the rebuild radius
+            // stays at 3x3x3.
             for (int32 dz = -1; dz <= 1; ++dz) {
                 for (int32 dy = -1; dy <= 1; ++dy) {
                     for (int32 dx = -1; dx <= 1; ++dx) {
@@ -1718,19 +2160,34 @@ void ASmoothVoxelTerrain::FVoxelChunk::AddVoxelFaces(int32 LocalX, int32 LocalY,
     Neighborhood.EastData = RetrieveVoxelDataPtr(FIntVector(1, 0, 0));
     Neighborhood.SouthData = RetrieveVoxelDataPtr(FIntVector(0, -1, 0));
     Neighborhood.NorthData = RetrieveVoxelDataPtr(FIntVector(0, 1, 0));
+    Neighborhood.SouthWestData = RetrieveVoxelDataPtr(FIntVector(-1, -1, 0));
+    Neighborhood.SouthEastData = RetrieveVoxelDataPtr(FIntVector(1, -1, 0));
+    Neighborhood.NorthWestData = RetrieveVoxelDataPtr(FIntVector(-1, 1, 0));
+    Neighborhood.NorthEastData = RetrieveVoxelDataPtr(FIntVector(1, 1, 0));
 
     FLocalHeightGrid HeightGrid;
-    HeightGrid.Heights = HeightMap ? HeightMap->GetData() : nullptr; HeightGrid.CacheSize = TerrainOwner->ChunkSize + 3;
+    HeightGrid.Heights = HeightMap ? HeightMap->GetData() : nullptr; HeightGrid.CacheSize = TerrainOwner->ChunkSize + 5;
     FTriIDArray NewTriIDs;
 
-    TerrainOwner->GetTerrainConfig().AppendVoxelFacesLocal(LocalX, LocalY, LocalZ, Mesh, NewTriIDs, HeightGrid, Neighborhood, Coord);
+    // Held by value so the cache can safely point at it for the duration of the call.
+    const FTerrainGenConfig Config = TerrainOwner->GetTerrainConfig();
+
+    // Reused across calls. A single edit runs this 27 times, and a fresh cache would
+    // allocate a few hundred KB each time; Init only memzeros when the arrays are
+    // already the right size. Game-thread only, and Init always runs before any read,
+    // so the pointers it holds are never stale at the point of use.
+    static thread_local FCaveSmoothCache CaveCache;
+    CaveCache.Init(&Config, &HeightGrid, &Neighborhood, Coord);
+
+    Config.AppendVoxelFacesLocal(LocalX, LocalY, LocalZ, Mesh, NewTriIDs, HeightGrid, Neighborhood, Coord,
+        CaveCache.IsReady() ? &CaveCache : nullptr);
     if (NewTriIDs.Num() > 0) VoxelTriangles.Add(VoxelIndex, NewTriIDs);
 
     if (GrassMesh && TerrainOwner->bEnableGrassGeometry && (*VoxelData)[VoxelIndex] == EVoxelType::Grass)
     {
         if (Neighborhood.GetVoxel(LocalX, LocalY, LocalZ + 1) == EVoxelType::Air) {
             FTriIDArray NewGrassTriIDs;
-            TerrainOwner->GetTerrainConfig().AppendGrassBladesLocal(LocalX, LocalY, LocalZ, *GrassMesh, NewGrassTriIDs, HeightGrid, Neighborhood, Coord);
+            Config.AppendGrassBladesLocal(LocalX, LocalY, LocalZ, *GrassMesh, NewGrassTriIDs, HeightGrid, Neighborhood, Coord);
             if (NewGrassTriIDs.Num() > 0) GrassVoxelTriangles.Add(VoxelIndex, NewGrassTriIDs);
         }
     }

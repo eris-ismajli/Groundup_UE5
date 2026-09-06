@@ -14,6 +14,7 @@ namespace UE::Geometry { class FDynamicMesh3; }
 using FTriIDArray = TArray<int32, TInlineAllocator<64>>;
 
 struct FChunkNeighborhood;
+struct FCaveSmoothCache;
 
 struct FLocalHeightGrid
 {
@@ -21,7 +22,9 @@ struct FLocalHeightGrid
     int32 CacheSize;
     FORCEINLINE float GetHeight(int32 LocalX, int32 LocalY) const
     {
-        return Heights[(LocalX + 1) + (LocalY + 1) * CacheSize];
+        // Halo is now 2 columns: the relaxation pass reads cells two out from a
+        // chunk-edge vertex, and those cells need their own corner heights.
+        return Heights[(LocalX + 2) + (LocalY + 2) * CacheSize];
     }
 };
 
@@ -87,6 +90,21 @@ struct FCaveSettings
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Surface & Depth")
     int32 CaveBedrockSafetyMargin = 2;
+
+    // --- Wall Smoothing ---
+    // Master switch for cave-wall vertex displacement. Off = classic hard cubes.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Smoothing")
+    bool bSmoothCaves = true;
+
+    // Tangential smoothing strength. 0 = raw surface-nets centroids (blocky but stable),
+    // 1 = full Laplacian. Above ~0.7 the surface starts losing volume.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Smoothing", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float SmoothRelaxation = 0.6f;
+
+    // Newton polish passes run AFTER relaxation, correcting the normal-direction error
+    // it introduces. 0 disables. Each pass costs 4 field evaluations.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Smoothing", meta = (ClampMin = "0", ClampMax = "4"))
+    int32 SmoothIterations = 2;
 };
 
 USTRUCT(BlueprintType)
@@ -186,13 +204,67 @@ struct FTerrainGenConfig
 
     float GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) const;
     float GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const;
-    FVector GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+
+    // Carve-time surface height for one voxel column: the min of its 4 corner heights.
+    // This is the exact expression GenerateChunkData uses, factored out so the mesher
+    // and the generator can never drift apart.
+    float GetSurfaceHeightLocal(int32 LocalX, int32 LocalY, const FLocalHeightGrid& HeightGrid) const;
+    int32 GetGroundLevelLocal(int32 LocalX, int32 LocalY, const FLocalHeightGrid& HeightGrid) const;
+
+    // Signed carve field. > 0 means carved out (air). Sign is bit-identical to the old
+    // IsInsideCave, so existing worlds regenerate unchanged.
+    float GetCaveDensityAt(float WorldX, float WorldY, float WorldZ, float SurfaceHeight) const;
+    float GetCaveSmoothFieldAt(float VX, float VY, float VZ, float SurfaceHeight) const;   // NEW
+    float GetCaveDensity(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const;
+    bool IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const;
+
+    FVector GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 VertZ, int32 VoxX, int32 VoxY, int32 VoxZ, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord, FCaveSmoothCache* CaveCache = nullptr) const;
     FVector GetSmoothNormalLocal(int32 VertX, int32 VertY, const FLocalHeightGrid& HeightGrid) const;
     float GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, int32 LocalZ, const FVector& VertexLocalPos, const FChunkNeighborhood& Neighborhood, const FLocalHeightGrid& HeightGrid) const;
-    bool IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const;
     FLinearColor GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const;
-    void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+    void AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord, FCaveSmoothCache* CaveCache = nullptr) const;
     void AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, UE::Geometry::FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord) const;
+};
+
+struct FCaveSmoothCache
+{
+    void Init(const FTerrainGenConfig* InConfig, const FLocalHeightGrid* InHeights,
+        const FChunkNeighborhood* InNeighborhood, const FIntVector& InChunkCoord);
+
+    bool IsReady() const { return bReady; }
+
+    bool GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset);
+
+private:
+    static constexpr int32 SLAB_COUNT = 8;   // power of two; index is z & 7
+
+    float GetCellDensity(int32 cx, int32 cy, int32 cz);
+    bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);
+    float VertexSurfaceHeight(int32 vx, int32 vy) const;
+    bool  GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset);
+
+    const FTerrainGenConfig* Config = nullptr;
+    const FLocalHeightGrid* Heights = nullptr;
+    const FChunkNeighborhood* Neighborhood = nullptr;
+    FIntVector ChunkCoord = FIntVector::ZeroValue;
+    bool bReady = false;
+
+    int32 CS = 32;
+    int32 CellW = 36;   // CS + 4 : cells  cx in [-2 .. CS+1]
+    int32 BaseW = 35;   // CS + 3 : stage-1 verts  vx in [-1 .. CS+1]
+    int32 VertW = 33;   // CS + 1 : final verts    vx in [ 0 .. CS  ]
+
+    TArray<int32> CellSlabZ;
+    TArray<float> CellDensityCache;
+    TArray<uint8> CellValid;
+
+    TArray<int32>     BaseSlabZ;
+    TArray<FVector3f> BaseOffsetCache;
+    TArray<uint8>     BaseState;   // 0 unknown, 1 no vertex, 2 have vertex
+
+    TArray<int32>     VertSlabZ;
+    TArray<FVector3f> VertOffsetCache;
+    TArray<uint8>     VertState;
 };
 
 UCLASS()
