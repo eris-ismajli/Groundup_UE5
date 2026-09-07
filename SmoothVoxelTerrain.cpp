@@ -1438,7 +1438,7 @@ float FCaveSmoothCache::GetCellDensity(int32 cx, int32 cy, int32 cz)
     if (CellSlabZ[S] != cz)
     {
         CellSlabZ[S] = cz;
-        FMemory::Memzero(CellValid.GetData() + S * Plane, Plane);
+        FMemory::Memzero(CellValid.GetData() + S * Plane, Plane * CellValid.GetTypeSize());
     }
 
     const int32 I = S * Plane + (cx + 2) + (cy + 2) * CellW;
@@ -1486,7 +1486,7 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
     if (BaseSlabZ[S] != vz)
     {
         BaseSlabZ[S] = vz;
-        FMemory::Memzero(BaseState.GetData() + S * Plane, Plane);
+        FMemory::Memzero(BaseState.GetData() + S * Plane, Plane * BaseState.GetTypeSize());
     }
 
     const int32 I = S * Plane + (vx + 1) + (vy + 1) * BaseW;
@@ -1565,7 +1565,8 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
     if (VertSlabZ[S] != vz)
     {
         VertSlabZ[S] = vz;
-        FMemory::Memzero(VertState.GetData() + S * Plane, Plane);
+        // FIX: Multiply Plane by GetTypeSize()
+        FMemory::Memzero(VertState.GetData() + S * Plane, Plane * VertState.GetTypeSize());
     }
 
     const int32 I = S * Plane + vx + vy * VertW;
@@ -1589,12 +1590,11 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
             }
     if (!bAir || !bSolid) return false;
 
-    // Pristine test: all 8 voxels touching this vertex must still match what generation
-    // would produce. This is the exact analogue of the top-surface rule's
-    // "VoxZ == ExpectedGroundLevel" condition, and it is what makes player edits come
-    // out as clean cubes: touch any of the 8 and the vertex snaps back to the lattice.
-    // Because the test reads the same 8 voxels no matter which face is asking, every
-    // face still agrees on the result, so no cracks open.
+    // FIX: The pristine test has been removed/commented out below. 
+    // Snapping modified voxels back to the lattice is what was warping the unedited adjacent neighbors. 
+    // Now, edits will blend into the smooth geometry undisturbed.
+
+    /*
     for (int32 dz = -1; dz <= 0; ++dz)
         for (int32 dy = -1; dy <= 0; ++dy)
             for (int32 dx = -1; dx <= 0; ++dx)
@@ -1603,6 +1603,7 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
                 const bool bActualAir = (Neighborhood->GetVoxel(cx, cy, cz) == EVoxelType::Air);
                 if (bActualAir != IsCellExpectedAir(cx, cy, cz)) return false;
             }
+    */
 
     const FVector3f Origin(
         (float)(ChunkCoord.X * CS + vx),
