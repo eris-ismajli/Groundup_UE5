@@ -1595,26 +1595,79 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
             GroundMin = FMath::Min(GroundMin, GL);
         }
 
-    // Surface test: the 8 cells around the vertex must straddle the field's zero set.
-    bool bCellAir = false, bCellSolid = false;
-    for (int32 c = 0; c < 8; ++c)
+    // Fast reject on the 8 cells touching the vertex. All-solid or all-air means no
+    // exposed face can exist here, so nothing below can apply.
     {
-        const float D = GetCellDensity(vx - 1 + (c & 1), vy - 1 + ((c >> 1) & 1), vz - 1 + ((c >> 2) & 1));
-        if (D > 0.0f) bCellAir = true; else bCellSolid = true;
+        bool bAnyAir = false, bAnySolid = false;
+        for (int32 c = 0; c < 8; ++c)
+        {
+            const float D = GetCellDensity(vx - 1 + (c & 1), vy - 1 + ((c >> 1) & 1), vz - 1 + ((c >> 2) & 1));
+            if (D > 0.0f) bAnyAir = true; else bAnySolid = true;
+        }
+        if (!bAnyAir || !bAnySolid) return false;
     }
-    if (!bCellAir || !bCellSolid) return false;
 
-    const FVector3f V((float)(ChunkCoord.X * CS + vx),
-        (float)(ChunkCoord.Y * CS + vy),
-        (float)(vz + Config->BedrockLevel));
-    const float SurfaceHeight = VertexSurfaceHeight(vx, vy);
+    // Mean of the 4 cells in slab k that surround the vertex transversally. This IS the
+    // trilinear field evaluated on the vertex's own ray, at t = k + 0.5. Sampling the
+    // individual cells instead puts the sample half a voxel off to the side, and which
+    // of them straddles flips along a slanted wall - that flip was the zigzag.
+    auto SlabMean = [&](int32 Axis, int32 k) -> float
+        {
+            float Sum = 0.0f;
+            for (int32 i = 0; i < 4; ++i)
+            {
+                int32 o[3];
+                o[Axis] = k;
+                o[(Axis + 1) % 3] = (i & 1) - 1;
+                o[(Axis + 2) % 3] = ((i >> 1) & 1) - 1;
+                Sum += GetCellDensity(vx + o[0], vy + o[1], vz + o[2]);
+            }
+            return Sum * 0.25f;
+        };
 
-    // Lock to the axis most aligned with the surface normal. This is the axis whose ray
-    // hits the surface most head-on, so it needs the least reach, and on a wall every
-    // vertex picks the wall's own axis.
-    const FVector3f G = CaveFieldGradient(*Config, V, SurfaceHeight);
-    const float AG[3] = { FMath::Abs(G.X), FMath::Abs(G.Y), FMath::Abs(G.Z) };
+    // k = -2..1  ->  t in [-1.5, +1.5]. Two slabs (t in [-0.5, 0.5]) is the strict
+    // never-leaves-its-own-cell setting; it terraces on anything near 45 degrees,
+    // because those vertices need to travel further than half a voxel to reach the
+    // surface at all. Cell reads stay inside GetCellDensity's [-2, CS+1] window for
+    // every vx in [0, CS], which is the only range GetVertexOffset ever asks for.
+    constexpr int32 KMin = -2;
+    constexpr int32 NSlab = 4;
 
+    float Cross[3] = { 0.0f, 0.0f, 0.0f };
+    float Grad[3] = { 0.0f, 0.0f, 0.0f };
+    bool  bHas[3] = { false, false, false };
+
+    for (int32 Axis = 0; Axis < 3; ++Axis)
+    {
+        float M[NSlab];
+        for (int32 j = 0; j < NSlab; ++j) M[j] = SlabMean(Axis, KMin + j);
+
+        // Central difference on the ray at t = 0.
+        Grad[Axis] = M[2] - M[1];
+
+        for (int32 j = 0; j + 1 < NSlab; ++j)
+        {
+            const float A = M[j], B = M[j + 1];
+            if ((A > 0.0f) == (B > 0.0f)) continue;
+
+            const float Denom = A - B;
+            const float f = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : A / Denom, 0.0f, 1.0f);
+            const float t = (float)(KMin + j) + 0.5f + f;
+
+            // Nearest to the vertex. This is what makes two vertices on the same ray
+            // agree on which crossing is theirs, and what stops a vertex reaching
+            // across a thin rib to the surface on the far side.
+            if (!bHas[Axis] || FMath::Abs(t) < FMath::Abs(Cross[Axis]))
+            {
+                Cross[Axis] = t;
+                bHas[Axis] = true;
+            }
+        }
+    }
+
+    // Steepest axis that actually has a crossing. Steepest means most head-on, which
+    // also means the shortest travel, so the reach above is never spent needlessly.
+    const float AG[3] = { FMath::Abs(Grad[0]), FMath::Abs(Grad[1]), FMath::Abs(Grad[2]) };
     int32 Order[3] = { 0, 1, 2 };
     for (int32 i = 1; i < 3; ++i)
         for (int32 j = i; j > 0 && AG[Order[j]] > AG[Order[j - 1]]; --j)
@@ -1622,26 +1675,25 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
             const int32 Tmp = Order[j]; Order[j] = Order[j - 1]; Order[j - 1] = Tmp;
         }
 
+    int32 Axis = -1;
     for (int32 i = 0; i < 3; ++i)
-    {
-        const int32 Axis = Order[i];
-        if (AG[Axis] <= SMALL_NUMBER) break;
+        if (bHas[Order[i]]) { Axis = Order[i]; break; }
+    if (Axis < 0) return false;
 
-        float T;
-        if (!FindNearestAxisCrossing(*Config, V, Axis, SurfaceHeight, T)) continue;
+    float T = Cross[Axis];
 
-        // A Z-locked vertex must not climb into the band the height-field rule owns,
-        // or it pokes through the terrain surface at a cave mouth.
-        if (Axis == 2) T = FMath::Min(T, (float)GroundMin - (float)vz);
+    // Blockiness dial. 1.0 sits exactly on the surface; 0.0 is the raw lattice.
+    T *= FMath::Clamp(Config->CaveSettings.SmoothRelaxation, 0.0f, 1.0f);
 
-        OutOffset = FVector3f(0.0f, 0.0f, 0.0f);
-        OutOffset[Axis] = FMath::Clamp(T, -CaveAxisReach, CaveAxisReach);
+    // A Z-locked vertex must not climb into the band the height-field rule owns.
+    if (Axis == 2) T = FMath::Min(T, (float)GroundMin - (float)vz);
 
-        BaseOffsetCache[I] = OutOffset;
-        BaseState[I] = 2;
-        return true;
-    }
-    return false;
+    OutOffset = FVector3f(0.0f, 0.0f, 0.0f);
+    OutOffset[Axis] = T;
+
+    BaseOffsetCache[I] = OutOffset;
+    BaseState[I] = 2;
+    return true;
 }
 
 bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
@@ -1667,21 +1719,34 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
     FVector3f Off;
     if (!GetBaseOffset(vx, vy, vz, Off)) return false;
 
-    // Wall test on the ACTUAL voxels: only move a vertex a real face uses.
-    bool bAir = false, bSolid = false;
-    for (int32 dz = -1; dz <= 0; ++dz)
-        for (int32 dy = -1; dy <= 0; ++dy)
-            for (int32 dx = -1; dx <= 0; ++dx)
-            {
-                if (Neighborhood->GetVoxel(vx + dx, vy + dy, vz + dz) == EVoxelType::Air) bAir = true;
-                else bSolid = true;
-            }
-    if (!bAir || !bSolid) return false;
+    // Exactly one component is non-zero by construction. All-zero means the lattice
+    // position either way, so there is nothing to validate.
+    int32 Axis = -1;
+    for (int32 a = 0; a < 3; ++a) if (Off[a] != 0.0f) { Axis = a; break; }
+    if (Axis < 0) return false;
+
+    // A REAL exposed face perpendicular to the locked axis must touch this vertex.
+    // The field says where the surface is; the voxels say whether this vertex is on a
+    // face that gets drawn. After an edit the two disagree, and moving a vertex with no
+    // face behind it is exactly how a buried plane ends up deformed.
+    bool bFace = false;
+    for (int32 i = 0; i < 4 && !bFace; ++i)
+    {
+        int32 o[3];
+        o[Axis] = -1;
+        o[(Axis + 1) % 3] = (i & 1) - 1;
+        o[(Axis + 2) % 3] = ((i >> 1) & 1) - 1;
+
+        const EVoxelType M = Neighborhood->GetVoxel(vx + o[0], vy + o[1], vz + o[2]);
+        o[Axis] = 0;
+        const EVoxelType P = Neighborhood->GetVoxel(vx + o[0], vy + o[1], vz + o[2]);
+
+        bFace = (M == EVoxelType::Air) != (P == EVoxelType::Air);
+    }
+    if (!bFace) return false;
 
     if (!FMath::IsFinite(Off.X) || !FMath::IsFinite(Off.Y) || !FMath::IsFinite(Off.Z)) return false;
 
-    // No uniform clamp needed: the offset is single-axis and already bounded, and any
-    // rescale here would have to preserve that.
     VertOffsetCache[I] = Off;
     VertState[I] = 2;
     OutOffset = Off;
