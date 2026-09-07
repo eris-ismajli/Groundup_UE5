@@ -1391,6 +1391,96 @@ bool FTerrainGenConfig::IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, f
 }
 
 // ---------------------------------------------------------------------------------
+// AXIS-LOCKED PROJECTION
+//
+// A vertex moves along ONE lattice axis. The other two coordinates stay exactly on the
+// grid, so every face whose normal is that axis still projects to a perfect square.
+// Same contract the height-field rule gives the top surface, where only Z ever moves.
+// ---------------------------------------------------------------------------------
+
+// How far along its locked axis a vertex may travel, in voxels. Deliberately larger
+// than half a voxel: a vertex must be able to reach the same crossing the next vertex
+// along the ray reaches, because that is what collapses a staircase step to zero width
+// and lets the sliver filter delete it. At 0.5 every step survives at ~1 voxel wide and
+// you get terracing. Much above 1.5 and a one-voxel wall between two caves can grab the
+// crossing on the far side.
+static constexpr float CaveAxisReach = 1.5f;
+
+// Scan resolution when hunting the crossing. Must be small against the thinnest feature
+// the field makes, or a thin rib gets stepped straight over.
+static constexpr float CaveAxisScanStep = 0.25f;
+
+static FORCEINLINE float SampleCaveFieldOnAxis(const FTerrainGenConfig& Config, const FVector3f& V,
+    int32 Axis, float T, float SurfaceHeight)
+{
+    FVector3f P = V;
+    P[Axis] += T;
+    return Config.GetCaveSmoothFieldAt(P.X, P.Y, P.Z, SurfaceHeight);
+}
+
+// Direction only. Magnitude is 4*H*|grad| for a locally linear field, which is all the
+// axis pick needs.
+static FVector3f CaveFieldGradient(const FTerrainGenConfig& Config, const FVector3f& V, float SurfaceHeight)
+{
+    static const FVector3f K[4] = {
+        FVector3f(1.0f, -1.0f, -1.0f), FVector3f(-1.0f, -1.0f,  1.0f),
+        FVector3f(-1.0f,  1.0f, -1.0f), FVector3f(1.0f,  1.0f,  1.0f) };
+    const float H = 0.35f;
+
+    FVector3f G(0.0f, 0.0f, 0.0f);
+    for (int32 k = 0; k < 4; ++k)
+    {
+        const FVector3f Q = V + K[k] * H;
+        G += K[k] * Config.GetCaveSmoothFieldAt(Q.X, Q.Y, Q.Z, SurfaceHeight);
+    }
+    return G;
+}
+
+// Zero crossing of the field along one lattice axis, nearest to the vertex. "Nearest"
+// is what makes two vertices on the same ray agree on the same crossing, which is the
+// collapse condition above. Bracketed scan then Illinois, so it cannot run away the way
+// a bare Newton step can where the gradient is small.
+static bool FindNearestAxisCrossing(const FTerrainGenConfig& Config, const FVector3f& V,
+    int32 Axis, float SurfaceHeight, float& OutT)
+{
+    const float F0 = SampleCaveFieldOnAxis(Config, V, Axis, 0.0f, SurfaceHeight);
+    if (F0 == 0.0f) { OutT = 0.0f; return true; }
+
+    float TPrevP = 0.0f, FPrevP = F0;
+    float TPrevN = 0.0f, FPrevN = F0;
+    float Lo = 0.0f, Hi = 0.0f, FLo = 0.0f, FHi = 0.0f;
+    bool bFound = false;
+
+    for (float S = CaveAxisScanStep; S <= CaveAxisReach + 1e-4f; S += CaveAxisScanStep)
+    {
+        const float FP = SampleCaveFieldOnAxis(Config, V, Axis, S, SurfaceHeight);
+        if ((FP > 0.0f) != (FPrevP > 0.0f)) { Lo = TPrevP; Hi = S; FLo = FPrevP; FHi = FP; bFound = true; break; }
+        TPrevP = S; FPrevP = FP;
+
+        const float FN = SampleCaveFieldOnAxis(Config, V, Axis, -S, SurfaceHeight);
+        if ((FN > 0.0f) != (FPrevN > 0.0f)) { Lo = -S; Hi = TPrevN; FLo = FN; FHi = FPrevN; bFound = true; break; }
+        TPrevN = -S; FPrevN = FN;
+    }
+    if (!bFound) return false;
+
+    int32 Side = 0;
+    for (int32 i = 0; i < 6; ++i)
+    {
+        const float Denom = FLo - FHi;
+        float T = FMath::IsNearlyZero(Denom) ? 0.5f * (Lo + Hi) : Lo + (Hi - Lo) * (FLo / Denom);
+        T = FMath::Clamp(T, Lo, Hi);
+
+        const float F = SampleCaveFieldOnAxis(Config, V, Axis, T, SurfaceHeight);
+        if ((F > 0.0f) == (FLo > 0.0f)) { Lo = T; FLo = F; if (Side == -1) FHi *= 0.5f; Side = -1; }
+        else { Hi = T; FHi = F; if (Side == 1) FLo *= 0.5f; Side = 1; }
+
+        if (Hi - Lo < 1e-4f) break;
+    }
+    OutT = 0.5f * (Lo + Hi);
+    return true;
+}
+
+// ---------------------------------------------------------------------------------
 // FCaveSmoothCache
 // ---------------------------------------------------------------------------------
 void FCaveSmoothCache::Init(const FTerrainGenConfig* InConfig, const FLocalHeightGrid* InHeights,
@@ -1495,63 +1585,63 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
 
     BaseState[I] = 1;
 
-    // Ground gate: stay strictly below the band the height-field rule owns. Inside this
-    // gate all 8 cells are at or below their column's ground level, which is what makes
-    // "density > 0" and "expected air" the same predicate below.
+    // Ground gate: stay strictly below the band the height-field rule owns.
+    int32 GroundMin = MAX_int32;
     for (int32 dy = -1; dy <= 0; ++dy)
         for (int32 dx = -1; dx <= 0; ++dx)
-            if (vz > Config->GetGroundLevelLocal(vx + dx, vy + dy, *Heights)) return false;
+        {
+            const int32 GL = Config->GetGroundLevelLocal(vx + dx, vy + dy, *Heights);
+            if (vz > GL) return false;
+            GroundMin = FMath::Min(GroundMin, GL);
+        }
 
-    // Corner c: bit0 = x, bit1 = y, bit2 = z. Sample position is the voxel index.
-    float d[8];
-    bool bAir = false, bSolid = false;
+    // Surface test: the 8 cells around the vertex must straddle the field's zero set.
+    bool bCellAir = false, bCellSolid = false;
     for (int32 c = 0; c < 8; ++c)
     {
-        const int32 cx = vx - 1 + (c & 1);
-        const int32 cy = vy - 1 + ((c >> 1) & 1);
-        const int32 cz = vz - 1 + ((c >> 2) & 1);
-        d[c] = GetCellDensity(cx, cy, cz);
-        if (d[c] > 0.0f) bAir = true; else bSolid = true;
+        const float D = GetCellDensity(vx - 1 + (c & 1), vy - 1 + ((c >> 1) & 1), vz - 1 + ((c >> 2) & 1));
+        if (D > 0.0f) bCellAir = true; else bCellSolid = true;
     }
-    if (!bAir || !bSolid) return false;
+    if (!bCellAir || !bCellSolid) return false;
 
-    static const int32 E[12][2] = {
-        {0,1},{2,3},{4,5},{6,7},      // X edges
-        {0,2},{1,3},{4,6},{5,7},      // Y edges
-        {0,4},{1,5},{2,6},{3,7}       // Z edges
-    };
+    const FVector3f V((float)(ChunkCoord.X * CS + vx),
+        (float)(ChunkCoord.Y * CS + vy),
+        (float)(vz + Config->BedrockLevel));
+    const float SurfaceHeight = VertexSurfaceHeight(vx, vy);
 
-    FVector3f Sum(0.0f, 0.0f, 0.0f);
-    int32 N = 0;
-    for (int32 e = 0; e < 12; ++e)
+    // Lock to the axis most aligned with the surface normal. This is the axis whose ray
+    // hits the surface most head-on, so it needs the least reach, and on a wall every
+    // vertex picks the wall's own axis.
+    const FVector3f G = CaveFieldGradient(*Config, V, SurfaceHeight);
+    const float AG[3] = { FMath::Abs(G.X), FMath::Abs(G.Y), FMath::Abs(G.Z) };
+
+    int32 Order[3] = { 0, 1, 2 };
+    for (int32 i = 1; i < 3; ++i)
+        for (int32 j = i; j > 0 && AG[Order[j]] > AG[Order[j - 1]]; --j)
+        {
+            const int32 Tmp = Order[j]; Order[j] = Order[j - 1]; Order[j - 1] = Tmp;
+        }
+
+    for (int32 i = 0; i < 3; ++i)
     {
-        const int32 a = E[e][0], b = E[e][1];
-        const bool bAirA = d[a] > 0.0f;
-        const bool bAirB = d[b] > 0.0f;
-        if (bAirA == bAirB) continue;
+        const int32 Axis = Order[i];
+        if (AG[Axis] <= SMALL_NUMBER) break;
 
-        const float Denom = d[a] - d[b];
-        const float t = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : d[a] / Denom, 0.0f, 1.0f);
+        float T;
+        if (!FindNearestAxisCrossing(*Config, V, Axis, SurfaceHeight, T)) continue;
 
-        const FVector3f Pa((float)(vx - 1 + (a & 1)), (float)(vy - 1 + ((a >> 1) & 1)), (float)(vz - 1 + ((a >> 2) & 1)));
-        const FVector3f Pb((float)(vx - 1 + (b & 1)), (float)(vy - 1 + ((b >> 1) & 1)), (float)(vz - 1 + ((b >> 2) & 1)));
-        Sum += Pa + (Pb - Pa) * t;
-        ++N;
+        // A Z-locked vertex must not climb into the band the height-field rule owns,
+        // or it pokes through the terrain surface at a cave mouth.
+        if (Axis == 2) T = FMath::Min(T, (float)GroundMin - (float)vz);
+
+        OutOffset = FVector3f(0.0f, 0.0f, 0.0f);
+        OutOffset[Axis] = FMath::Clamp(T, -CaveAxisReach, CaveAxisReach);
+
+        BaseOffsetCache[I] = OutOffset;
+        BaseState[I] = 2;
+        return true;
     }
-    if (N == 0) return false;
-
-    // The centroid lies in [v-1, v] per axis in sample space. Voxel l occupies [l, l+1]
-    // in render space, so sample -> render is a +0.5 shift, putting the result in
-    // [v-0.5, v+0.5]. That bound is structural here, not enforced by a clamp - which is
-    // exactly why this cannot saturate the way gradient projection did.
-    const FVector3f C = Sum / (float)N;
-    OutOffset = FVector3f(C.X + 0.5f - (float)vx,
-        C.Y + 0.5f - (float)vy,
-        C.Z + 0.5f - (float)vz);
-
-    BaseOffsetCache[I] = OutOffset;
-    BaseState[I] = 2;
-    return true;
+    return false;
 }
 
 bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
@@ -1565,7 +1655,6 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
     if (VertSlabZ[S] != vz)
     {
         VertSlabZ[S] = vz;
-        // FIX: Multiply Plane by GetTypeSize()
         FMemory::Memzero(VertState.GetData() + S * Plane, Plane * VertState.GetTypeSize());
     }
 
@@ -1573,13 +1662,12 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
     if (VertState[I] == 1) return false;
     if (VertState[I] == 2) { OutOffset = VertOffsetCache[I]; return true; }
 
-    VertState[I] = 1;   // pessimistic default; every early-out below leaves it here
+    VertState[I] = 1;
 
-    // Stage 1 (also applies the ground gate and the sign-change test).
-    FVector3f Base;
-    if (!GetBaseOffset(vx, vy, vz, Base)) return false;
+    FVector3f Off;
+    if (!GetBaseOffset(vx, vy, vz, Off)) return false;
 
-    // Cheap wall test on the ACTUAL voxels, before the pristine test.
+    // Wall test on the ACTUAL voxels: only move a vertex a real face uses.
     bool bAir = false, bSolid = false;
     for (int32 dz = -1; dz <= 0; ++dz)
         for (int32 dy = -1; dy <= 0; ++dy)
@@ -1590,124 +1678,10 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
             }
     if (!bAir || !bSolid) return false;
 
-    // FIX: The pristine test has been removed/commented out below. 
-    // Snapping modified voxels back to the lattice is what was warping the unedited adjacent neighbors. 
-    // Now, edits will blend into the smooth geometry undisturbed.
-
-    /*
-    for (int32 dz = -1; dz <= 0; ++dz)
-        for (int32 dy = -1; dy <= 0; ++dy)
-            for (int32 dx = -1; dx <= 0; ++dx)
-            {
-                const int32 cx = vx + dx, cy = vy + dy, cz = vz + dz;
-                const bool bActualAir = (Neighborhood->GetVoxel(cx, cy, cz) == EVoxelType::Air);
-                if (bActualAir != IsCellExpectedAir(cx, cy, cz)) return false;
-            }
-    */
-
-    const FVector3f Origin(
-        (float)(ChunkCoord.X * CS + vx),
-        (float)(ChunkCoord.Y * CS + vy),
-        (float)(vz + Config->BedrockLevel));
-
-    FVector3f P = Origin + Base;
-
-    // Stage 2: one Laplacian pass over the 6 axis neighbours. This is where the
-    // tangential smoothing comes from - stage 1 alone leaves every vertex pinned to its
-    // own cell and the surface still reads as facets. Neighbour positions come from the
-    // procedural field only, so two chunks compute the same value for a shared vertex.
-    const float Lambda = FMath::Clamp(Config->CaveSettings.SmoothRelaxation, 0.0f, 1.0f);
-    if (Lambda > 0.0f)
-    {
-        static const FIntVector NB[6] = {
-            FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
-            FIntVector(0, -1, 0), FIntVector(0, 1, 0),
-            FIntVector(0, 0, -1), FIntVector(0, 0, 1)
-        };
-
-        FVector3f Sum(0.0f, 0.0f, 0.0f);
-        int32 Count = 0;
-        for (int32 n = 0; n < 6; ++n)
-        {
-            const int32 nx = vx + NB[n].X, ny = vy + NB[n].Y, nz = vz + NB[n].Z;
-            FVector3f NOff;
-            if (!GetBaseOffset(nx, ny, nz, NOff)) continue;
-            Sum += FVector3f((float)(ChunkCoord.X * CS + nx),
-                (float)(ChunkCoord.Y * CS + ny),
-                (float)(nz + Config->BedrockLevel)) + NOff;
-            ++Count;
-        }
-
-        // Two or more: averaging toward a single neighbour just drags the vertex at a
-        // surface rim instead of smoothing it.
-        if (Count > 0)
-        {
-            const FVector3f Avg = Sum / (float)Count;
-            // Weight by how complete the ring is. A vertex on a rim or a thin feature
-            // has only 2 or 3 surface neighbours, and averaging toward their midpoint at
-            // full strength drags it well off its own cell, which is what turns its
-            // quads into long slivers. Full strength only where the ring is full.
-            const float W = Lambda * ((float)Count / 6.0f);
-            P = P + (Avg - P) * W;
-        }
-    }
-
-    // Stage 3: Newton polish. Relaxation pulls slightly off the surface along the
-    // normal; this puts it back without disturbing the tangential spread.
-    const int32 Iterations = FMath::Clamp(Config->CaveSettings.SmoothIterations, 0, 4);
-    if (Iterations > 0)
-    {
-        const float SurfaceHeight = VertexSurfaceHeight(vx, vy);
-
-        // Tetrahedral offsets: sum(K_k * D(P + K_k*h)) == 4h * grad(D) for a linear
-        // field, so one 4-sample pass gives both the value and the gradient.
-        static const FVector3f K[4] = {
-            FVector3f(1.0f, -1.0f, -1.0f),
-            FVector3f(-1.0f, -1.0f,  1.0f),
-            FVector3f(-1.0f,  1.0f, -1.0f),
-            FVector3f(1.0f,  1.0f,  1.0f)
-        };
-        const float H = 0.35f;
-
-        for (int32 Iter = 0; Iter < Iterations; ++Iter)
-        {
-            float Dk[4];
-            FVector3f GRaw(0.0f, 0.0f, 0.0f);
-            for (int32 k = 0; k < 4; ++k)
-            {
-                const FVector3f Q = P + K[k] * H;
-                Dk[k] = Config->GetCaveSmoothFieldAt(Q.X, Q.Y, Q.Z, SurfaceHeight);
-                GRaw += K[k] * Dk[k];
-            }
-
-            const float Val = (Dk[0] + Dk[1] + Dk[2] + Dk[3]) * 0.25f;
-            const float L2 = GRaw.SizeSquared();
-            if (L2 < 1e-12f) break;
-
-            // grad = GRaw / (4H), so -Val*grad/|grad|^2 collapses to this:
-            FVector3f Step = GRaw * (-Val * 4.0f * H / L2);
-
-            // Limit by MAGNITUDE, never per axis. A per-axis limit shortens one
-            // component and leaves the others, which rotates the step: neighbouring
-            // vertices then bend in different directions and the quads between them
-            // turn into slivers.
-            const float Len = Step.Size();
-            if (Len > 0.3f) Step *= (0.3f / Len);
-            P += Step;
-
-            if (Len < 1e-4f) break;
-        }
-    }
-
-    FVector3f Off = P - Origin;
     if (!FMath::IsFinite(Off.X) || !FMath::IsFinite(Off.Y) || !FMath::IsFinite(Off.Z)) return false;
 
-    // Safety net only. Stage 1 is structurally inside +/-0.5; stages 2 and 3 can nudge
-    // past it, and a vertex leaving its own cell could cross its neighbour and fold the
-    // mesh. Scale uniformly so the direction survives.
-    const float MaxComp = FMath::Max3(FMath::Abs(Off.X), FMath::Abs(Off.Y), FMath::Abs(Off.Z));
-    if (MaxComp > 0.5f) Off *= (0.5f / MaxComp);
-
+    // No uniform clamp needed: the offset is single-axis and already bounded, and any
+    // rescale here would have to preserve that.
     VertOffsetCache[I] = Off;
     VertState[I] = 2;
     OutOffset = Off;
