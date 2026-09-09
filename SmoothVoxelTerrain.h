@@ -235,11 +235,13 @@ struct FCaveSmoothCache
 
     bool GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset);
 
+    bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);
+
+
 private:
     static constexpr int32 SLAB_COUNT = 8;   // power of two; index is z & 7
 
     float GetCellDensity(int32 cx, int32 cy, int32 cz);
-    bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);
     float VertexSurfaceHeight(int32 vx, int32 vy) const;
     bool  GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset);
 

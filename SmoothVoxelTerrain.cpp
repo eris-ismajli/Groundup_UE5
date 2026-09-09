@@ -101,7 +101,6 @@ FORCEINLINE float FastPerlinNoise3D(float x, float y, float z)
 // NOISE HELPERS
 // ---------------------------------------------------------------------------------
 
-// Standard FBM (Fractal Brownian Motion)
 float CalculateFBM2D(float x, float y, int32 octaves, float freq, float amp, int32 layerSeed)
 {
     float total = 0.0f; float maxAmp = 0.0f;
@@ -109,7 +108,6 @@ float CalculateFBM2D(float x, float y, int32 octaves, float freq, float amp, int
         float offsetX = Hash2D(layerSeed, i) * 5000.0f;
         float offsetY = Hash2D(layerSeed + 1, i) * 5000.0f;
 
-        // Domain rotation
         float rx = (x * freq) + offsetX;
         float ry = (y * freq) + offsetY;
         float rotX = rx * 0.707f - ry * 0.707f;
@@ -123,7 +121,6 @@ float CalculateFBM2D(float x, float y, int32 octaves, float freq, float amp, int
     return maxAmp > 0.0f ? total / maxAmp : 0.0f;
 }
 
-// Ridged Multifractal FBM
 float CalculateRidgedFBM2D(float x, float y, int32 octaves, float freq, float amp, int32 layerSeed)
 {
     float total = 0.0f; float maxAmp = 0.0f;
@@ -148,7 +145,6 @@ float CalculateRidgedFBM2D(float x, float y, int32 octaves, float freq, float am
     return maxAmp > 0.0f ? total / maxAmp : 0.0f;
 }
 
-// 3D FBM for Cave Generation
 float CalculateFBM3D(float x, float y, float z, int32 octaves, float freq, float amp, int32 layerSeed)
 {
     float total = 0.0f;
@@ -218,8 +214,6 @@ struct FChunkNeighborhood
         if (LY < 0) { SY = -1; LY += ChunkSize; }
         else if (LY >= ChunkSize) { SY = 1; LY -= ChunkSize; }
 
-        // The original picked one pointer per axis and let the second overwrite the
-        // first, so a corner read landed in the wrong chunk. Diagonals are now explicit.
         const EVoxelType* TargetData = nullptr;
         if (SX == 0)      TargetData = (SY < 0) ? SouthData : NorthData;
         else if (SX < 0)  TargetData = (SY == 0) ? WestData : (SY < 0 ? SouthWestData : NorthWestData);
@@ -651,9 +645,6 @@ void ASmoothVoxelTerrain::ProcessTasks()
 
 bool ASmoothVoxelTerrain::CheckNeighborsDataReady(const FIntVector& ChunkCoord)
 {
-    // Eight, not four: the cave vertex rule reads the 8 voxels around a lattice vertex,
-    // which at a chunk corner reaches into the diagonal chunk. Meshing without it would
-    // give that corner a different answer than the diagonal chunk gives, i.e. a crack.
     const FIntVector Neighbors[8] = {
         FIntVector(ChunkCoord.X - 1, ChunkCoord.Y,     0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y,     0),
         FIntVector(ChunkCoord.X,     ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X,     ChunkCoord.Y + 1, 0),
@@ -699,9 +690,6 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
             TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> LocalVoxelData = MakeShared<TArray<EVoxelType>, ESPMode::ThreadSafe>();
             LocalVoxelData->SetNumZeroed(LocalChunkSize * LocalChunkSize * LocalMaxHeight);
 
-            // Halo is 2 columns on each side. The cave relaxation pass reads cells two
-            // out from a chunk-edge vertex, and each of those cells needs its own four
-            // corner heights, so the grid must span [-2, ChunkSize+2].
             int32 CacheSize = LocalChunkSize + 5;
             TSharedPtr<TArray<float>, ESPMode::ThreadSafe> LocalHeightMap = MakeShared<TArray<float>, ESPMode::ThreadSafe>();
             LocalHeightMap->SetNumUninitialized(CacheSize * CacheSize);
@@ -796,8 +784,6 @@ void ASmoothVoxelTerrain::GenerateChunkData(const FIntVector& ChunkCoord)
                         TargetChunk->VoxelData = LocalVoxelData; TargetChunk->HeightMap = LocalHeightMap; TargetChunk->State = EChunkState::DataReady;
                         if (Terrain->CheckNeighborsDataReady(ChunkCoord)) Terrain->MeshGenerationQueue.AddUnique(ChunkCoord);
 
-                        // Must cover the same eight the readiness test does, or a chunk
-                        // blocked only on a diagonal would never be woken up again.
                         const FIntVector Neighbors[8] = {
                             FIntVector(ChunkCoord.X - 1, ChunkCoord.Y,     0), FIntVector(ChunkCoord.X + 1, ChunkCoord.Y,     0),
                             FIntVector(ChunkCoord.X,     ChunkCoord.Y - 1, 0), FIntVector(ChunkCoord.X,     ChunkCoord.Y + 1, 0),
@@ -860,7 +846,6 @@ void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
 
             FTriIDArray TempTriIDs;
 
-            // z outermost: this is what keeps the cave cache's rolling slabs coherent.
             for (int32 lz = 0; lz < Config.MaxHeight; ++lz) {
                 for (int32 ly = 0; ly < Config.ChunkSize; ++ly) {
                     for (int32 lx = 0; lx < Config.ChunkSize; ++lx) {
@@ -1113,14 +1098,13 @@ EVoxelType ASmoothVoxelTerrain::GetVoxelAtWorld(int32 WorldX, int32 WorldY, int3
 // ---------------------------------------------------------------------------------
 // HEIGHT GENERATION 
 // ---------------------------------------------------------------------------------
+
 float FTerrainGenConfig::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) const
 {
     float BaseX = (float)WorldX; float BaseY = (float)WorldY;
 
-    // Global Base Noise
     float GlobalBaseNoise = CalculateFBM2D(BaseX, BaseY, 2, GrasslandBiome.GlobalBaseNoiseScale, 1.0f, Seed + 1);
 
-    // Biome Masks
     float SmoothMaskVal = 0.0f;
     if (GrasslandBiome.SmoothHillLikelihood > 0.0f && GrasslandBiome.SmoothHillHeight > 0.0f) {
         float SmoothMask = FastPerlinNoise2D(BaseX * GrasslandBiome.SmoothHillMaskScale + Hash2D(Seed, 10) * 1000, BaseY * GrasslandBiome.SmoothHillMaskScale + Hash2D(Seed, 11) * 1000) * 0.5f + 0.5f;
@@ -1156,7 +1140,6 @@ float FTerrainGenConfig::GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) cons
     float MaxDominantMask = FMath::Max(SmoothMaskVal, FMath::Max(JaggedMaskVal, PlainsMaskVal));
     float FlatWeight = FMath::Clamp(1.0f - MaxDominantMask, 0.0f, 1.0f);
 
-    // Apply Biomes using robust FBM calls
     if (FlatWeight > 0.0f && GrasslandBiome.FlatFieldHeight > 0.0f) {
         float FieldNoise = CalculateFBM2D(BaseX, BaseY, GrasslandBiome.FlatFieldOctaves, GrasslandBiome.FlatFieldNoiseScale, 1.0f, Seed + 40);
         TotalHeight += FieldNoise * GrasslandBiome.FlatFieldHeight * FlatWeight;
@@ -1218,10 +1201,11 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
     const int32 WorldX = ChunkCoord.X * ChunkSize + VertX;
     const int32 WorldY = ChunkCoord.Y * ChunkSize + VertY;
     const double BaseZ = (double)(VertZ + BedrockLevel);
+    const FVector RawGridPos = FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
 
-    if (!bSmoothTerrain) return FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
+    if (!bSmoothTerrain) return RawGridPos;
 
-    // --- Rule 1: top-surface displacement. Unchanged from the original. ---
+    // --- Rule 1: top-surface displacement ---
     if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) != EVoxelType::Air && VertZ > VoxZ)
     {
         if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) == EVoxelType::Air)
@@ -1233,21 +1217,57 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
         }
     }
 
-    // --- Rule 2: cave-wall displacement. Only reached when Rule 1 declined, and the two
-    // are provably disjoint: Rule 1 fires at VertZ == ground+1, Rule 2 requires
-    // VertZ <= ground for all four adjacent columns. ---
+    // --- Rule 2: cave-wall displacement ---
     if (CaveCache && CaveCache->IsReady())
     {
-        FVector3f Off;
-        if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off))
+        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) != EVoxelType::Air)
         {
-            return FVector((double)WorldX + (double)Off.X,
-                (double)WorldY + (double)Off.Y,
-                BaseZ + (double)Off.Z) * CubeSize;
+            auto IsNaturalAir = [&](int32 cx, int32 cy, int32 cz) -> bool
+                {
+                    if (cz <= 0) return false;
+                    if (cz >= MaxHeight) return true;
+                    if (cz > GetGroundLevelLocal(cx, cy, HeightGrid)) return true;
+                    const float SurfHeight = GetSurfaceHeightLocal(cx, cy, HeightGrid);
+                    return IsInsideCave(ChunkCoord.X * ChunkSize + cx,
+                        ChunkCoord.Y * ChunkSize + cy,
+                        cz + BedrockLevel,
+                        SurfHeight);
+                };
+
+            // Player-placed blocks inside caves are not natural cave walls; they stay cubes
+            if (!IsNaturalAir(VoxX, VoxY, VoxZ))
+            {
+                const int32 dx = VertX - VoxX; // 0 or 1
+                const int32 dy = VertY - VoxY; // 0 or 1
+                const int32 dz = VertZ - VoxZ; // 0 or 1
+
+                const int32 nx = VoxX + (dx == 1 ? 1 : -1);
+                const int32 ny = VoxY + (dy == 1 ? 1 : -1);
+                const int32 nz = VoxZ + (dz == 1 ? 1 : -1);
+
+                // A corner is on a natural cave face only if that neighbor face is currently air
+                // AND was expected procedural cave air in world generation:
+                const bool bCaveX = (Neighborhood.GetVoxel(nx, VoxY, VoxZ) == EVoxelType::Air) && IsNaturalAir(nx, VoxY, VoxZ);
+                const bool bCaveY = (Neighborhood.GetVoxel(VoxX, ny, VoxZ) == EVoxelType::Air) && IsNaturalAir(VoxX, ny, VoxZ);
+                const bool bCaveZ = (Neighborhood.GetVoxel(VoxX, VoxY, nz) == EVoxelType::Air) && IsNaturalAir(VoxX, VoxY, nz);
+
+                // If this corner is not on an exposed natural cave face of this voxel,
+                // it is an unexposed/internal corner and must remain an exact flat cube corner:
+                if (bCaveX || bCaveY || bCaveZ)
+                {
+                    FVector3f Off;
+                    if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off))
+                    {
+                        return FVector((double)WorldX + (double)Off.X,
+                            (double)WorldY + (double)Off.Y,
+                            BaseZ + (double)Off.Z) * CubeSize;
+                    }
+                }
+            }
         }
     }
 
-    return FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
+    return RawGridPos;
 }
 
 FVector FTerrainGenConfig::GetSmoothNormalLocal(int32 VertX, int32 VertY, const FLocalHeightGrid& HeightGrid) const
@@ -1283,11 +1303,8 @@ float FTerrainGenConfig::GetNeighborTopHeightLocal(int32 LocalX, int32 LocalY, i
 
 // ---------------------------------------------------------------------------------
 // CAVE DENSITY FIELD
-//
-// Sign-identical to the original IsInsideCave at integer coordinates, so the carved
-// voxel set is bit-for-bit what it was. Continuous in between, which is what the vertex
-// projection needs: a discontinuous field yields a discontinuous surface.
 // ---------------------------------------------------------------------------------
+
 float FTerrainGenConfig::GetCaveDensityAt(float WorldX, float WorldY, float WorldZ, float SurfaceHeight) const
 {
     if (!CaveSettings.bEnableCaves) return -1.0f;
@@ -1329,7 +1346,6 @@ float FTerrainGenConfig::GetCaveDensityAt(float WorldX, float WorldY, float Worl
 
     float Density = -1.0f;
 
-    // --- Tunnels. (radius - distance) has the same sign as the old DistSq < RadiusSq. ---
     const float T1A = FastPerlinNoise3D(
         fx * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 150, 1),
         fy * CaveSettings.TunnelNoiseScaleXZ + Hash3D(Seed, 151, 2),
@@ -1350,11 +1366,6 @@ float FTerrainGenConfig::GetCaveDensityAt(float WorldX, float WorldY, float Worl
         fz * (CaveSettings.TunnelNoiseScaleY * 1.25f) + Hash3D(Seed, 165, 6));
     Density = FMath::Max(Density, EffectiveRadius - FMath::Sqrt(T2A * T2A + T2B * T2B));
 
-    // --- Chambers. min(a,b) > 0 is true exactly when a > 0 AND b > 0, so this is
-    // sign-identical to the old "mask gate, then threshold test" pair, but continuous.
-    // The old hard gate made the field jump by up to 0.48 across the mask contour.
-    // The chamber term can never exceed MaskMargin, so skipping it when a tunnel already
-    // beats it is exact, not an approximation. ---
     if (MaskMargin > Density)
     {
         const float ChamberNoise = CalculateFBM3D(
@@ -1370,11 +1381,6 @@ float FTerrainGenConfig::GetCaveDensityAt(float WorldX, float WorldY, float Worl
     return Density;
 }
 
-// Voxel (l) is carved when the field sampled AT l is positive, but that voxel occupies
-// the cube [l, l+1]. So the solid boundary the player sees sits half a voxel positive of
-// the field's zero set on every axis. Undoing that shift here is what keeps the required
-// vertex offsets small: without it the projection asks for roughly -0.5 on every axis
-// everywhere and just translates the staircase instead of smoothing it.
 float FTerrainGenConfig::GetCaveSmoothFieldAt(float VX, float VY, float VZ, float SurfaceHeight) const
 {
     return GetCaveDensityAt(VX - 0.5f, VY - 0.5f, VZ - 0.5f, SurfaceHeight);
@@ -1392,22 +1398,9 @@ bool FTerrainGenConfig::IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, f
 
 // ---------------------------------------------------------------------------------
 // AXIS-LOCKED PROJECTION
-//
-// A vertex moves along ONE lattice axis. The other two coordinates stay exactly on the
-// grid, so every face whose normal is that axis still projects to a perfect square.
-// Same contract the height-field rule gives the top surface, where only Z ever moves.
 // ---------------------------------------------------------------------------------
 
-// How far along its locked axis a vertex may travel, in voxels. Deliberately larger
-// than half a voxel: a vertex must be able to reach the same crossing the next vertex
-// along the ray reaches, because that is what collapses a staircase step to zero width
-// and lets the sliver filter delete it. At 0.5 every step survives at ~1 voxel wide and
-// you get terracing. Much above 1.5 and a one-voxel wall between two caves can grab the
-// crossing on the far side.
 static constexpr float CaveAxisReach = 1.5f;
-
-// Scan resolution when hunting the crossing. Must be small against the thinnest feature
-// the field makes, or a thin rib gets stepped straight over.
 static constexpr float CaveAxisScanStep = 0.25f;
 
 static FORCEINLINE float SampleCaveFieldOnAxis(const FTerrainGenConfig& Config, const FVector3f& V,
@@ -1418,8 +1411,6 @@ static FORCEINLINE float SampleCaveFieldOnAxis(const FTerrainGenConfig& Config, 
     return Config.GetCaveSmoothFieldAt(P.X, P.Y, P.Z, SurfaceHeight);
 }
 
-// Direction only. Magnitude is 4*H*|grad| for a locally linear field, which is all the
-// axis pick needs.
 static FVector3f CaveFieldGradient(const FTerrainGenConfig& Config, const FVector3f& V, float SurfaceHeight)
 {
     static const FVector3f K[4] = {
@@ -1436,10 +1427,6 @@ static FVector3f CaveFieldGradient(const FTerrainGenConfig& Config, const FVecto
     return G;
 }
 
-// Zero crossing of the field along one lattice axis, nearest to the vertex. "Nearest"
-// is what makes two vertices on the same ray agree on the same crossing, which is the
-// collapse condition above. Bracketed scan then Illinois, so it cannot run away the way
-// a bare Newton step can where the gradient is small.
 static bool FindNearestAxisCrossing(const FTerrainGenConfig& Config, const FVector3f& V,
     int32 Axis, float SurfaceHeight, float& OutT)
 {
@@ -1483,6 +1470,7 @@ static bool FindNearestAxisCrossing(const FTerrainGenConfig& Config, const FVect
 // ---------------------------------------------------------------------------------
 // FCaveSmoothCache
 // ---------------------------------------------------------------------------------
+
 void FCaveSmoothCache::Init(const FTerrainGenConfig* InConfig, const FLocalHeightGrid* InHeights,
     const FChunkNeighborhood* InNeighborhood, const FIntVector& InChunkCoord)
 {
@@ -1518,8 +1506,6 @@ void FCaveSmoothCache::Init(const FTerrainGenConfig* InConfig, const FLocalHeigh
 
 float FCaveSmoothCache::GetCellDensity(int32 cx, int32 cy, int32 cz)
 {
-    // cz <= 0 is solid: the carve pass in GenerateChunkData starts at lz 1, so voxel 0
-    // is never removed and the mesher has to agree with it.
     if (cz <= 0 || cz >= Config->MaxHeight) return -1.0f;
     if (cx < -2 || cx > CS + 1 || cy < -2 || cy > CS + 1) return -1.0f;
 
@@ -1546,7 +1532,6 @@ float FCaveSmoothCache::GetCellDensity(int32 cx, int32 cy, int32 cz)
     return D;
 }
 
-// The voxel state generation WOULD have produced for this cell, from the field alone.
 bool FCaveSmoothCache::IsCellExpectedAir(int32 cx, int32 cy, int32 cz)
 {
     if (cz <= 0) return false;
@@ -1564,8 +1549,6 @@ float FCaveSmoothCache::VertexSurfaceHeight(int32 vx, int32 vy) const
             Config->GetSurfaceHeightLocal(vx, vy, *Heights)));
 }
 
-// Stage 1: surface-nets crossing centroid. Procedural only - reads no voxel data, so it
-// is safe for a relaxation neighbour to call this across an edited region.
 bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
 {
     if (vx < -1 || vx > CS + 1 || vy < -1 || vy > CS + 1) return false;
@@ -1585,7 +1568,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
 
     BaseState[I] = 1;
 
-    // Ground gate: stay strictly below the band the height-field rule owns.
     int32 GroundMin = MAX_int32;
     for (int32 dy = -1; dy <= 0; ++dy)
         for (int32 dx = -1; dx <= 0; ++dx)
@@ -1595,8 +1577,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
             GroundMin = FMath::Min(GroundMin, GL);
         }
 
-    // Fast reject on the 8 cells touching the vertex. All-solid or all-air means no
-    // exposed face can exist here, so nothing below can apply.
     {
         bool bAnyAir = false, bAnySolid = false;
         for (int32 c = 0; c < 8; ++c)
@@ -1607,10 +1587,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
         if (!bAnyAir || !bAnySolid) return false;
     }
 
-    // Mean of the 4 cells in slab k that surround the vertex transversally. This IS the
-    // trilinear field evaluated on the vertex's own ray, at t = k + 0.5. Sampling the
-    // individual cells instead puts the sample half a voxel off to the side, and which
-    // of them straddles flips along a slanted wall - that flip was the zigzag.
     auto SlabMean = [&](int32 Axis, int32 k) -> float
         {
             float Sum = 0.0f;
@@ -1625,11 +1601,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
             return Sum * 0.25f;
         };
 
-    // k = -2..1  ->  t in [-1.5, +1.5]. Two slabs (t in [-0.5, 0.5]) is the strict
-    // never-leaves-its-own-cell setting; it terraces on anything near 45 degrees,
-    // because those vertices need to travel further than half a voxel to reach the
-    // surface at all. Cell reads stay inside GetCellDensity's [-2, CS+1] window for
-    // every vx in [0, CS], which is the only range GetVertexOffset ever asks for.
     constexpr int32 KMin = -2;
     constexpr int32 NSlab = 4;
 
@@ -1642,7 +1613,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
         float M[NSlab];
         for (int32 j = 0; j < NSlab; ++j) M[j] = SlabMean(Axis, KMin + j);
 
-        // Central difference on the ray at t = 0.
         Grad[Axis] = M[2] - M[1];
 
         for (int32 j = 0; j + 1 < NSlab; ++j)
@@ -1654,9 +1624,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
             const float f = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : A / Denom, 0.0f, 1.0f);
             const float t = (float)(KMin + j) + 0.5f + f;
 
-            // Nearest to the vertex. This is what makes two vertices on the same ray
-            // agree on which crossing is theirs, and what stops a vertex reaching
-            // across a thin rib to the surface on the far side.
             if (!bHas[Axis] || FMath::Abs(t) < FMath::Abs(Cross[Axis]))
             {
                 Cross[Axis] = t;
@@ -1665,8 +1632,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
         }
     }
 
-    // Steepest axis that actually has a crossing. Steepest means most head-on, which
-    // also means the shortest travel, so the reach above is never spent needlessly.
     const float AG[3] = { FMath::Abs(Grad[0]), FMath::Abs(Grad[1]), FMath::Abs(Grad[2]) };
     int32 Order[3] = { 0, 1, 2 };
     for (int32 i = 1; i < 3; ++i)
@@ -1681,11 +1646,8 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
     if (Axis < 0) return false;
 
     float T = Cross[Axis];
-
-    // Blockiness dial. 1.0 sits exactly on the surface; 0.0 is the raw lattice.
     T *= FMath::Clamp(Config->CaveSettings.SmoothRelaxation, 0.0f, 1.0f);
 
-    // A Z-locked vertex must not climb into the band the height-field rule owns.
     if (Axis == 2) T = FMath::Min(T, (float)GroundMin - (float)vz);
 
     OutOffset = FVector3f(0.0f, 0.0f, 0.0f);
@@ -1719,16 +1681,16 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
     FVector3f Off;
     if (!GetBaseOffset(vx, vy, vz, Off)) return false;
 
-    // Exactly one component is non-zero by construction. All-zero means the lattice
-    // position either way, so there is nothing to validate.
     int32 Axis = -1;
     for (int32 a = 0; a < 3; ++a) if (Off[a] != 0.0f) { Axis = a; break; }
     if (Axis < 0) return false;
 
-    // A REAL exposed face perpendicular to the locked axis must touch this vertex.
-    // The field says where the surface is; the voxels say whether this vertex is on a
-    // face that gets drawn. After an edit the two disagree, and moving a vertex with no
-    // face behind it is exactly how a buried plane ends up deformed.
+    // A real exposed face perpendicular to the locked axis must touch this vertex,
+    // AND that face must have been an expected natural cave boundary in world generation.
+    // This ensures:
+    // 1. Unexposed voxels and player-mined rock faces have offset 0 (perfect cubes to begin with).
+    // 2. Natural cave walls stay smooth and never snap back.
+    // 3. All quads meeting at (vx, vy, vz) share the exact same 3D coordinate (NO GAPS or missing faces).
     bool bFace = false;
     for (int32 i = 0; i < 4 && !bFace; ++i)
     {
@@ -1737,11 +1699,20 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
         o[(Axis + 1) % 3] = (i & 1) - 1;
         o[(Axis + 2) % 3] = ((i >> 1) & 1) - 1;
 
-        const EVoxelType M = Neighborhood->GetVoxel(vx + o[0], vy + o[1], vz + o[2]);
+        int32 mX = vx + o[0], mY = vy + o[1], mZ = vz + o[2];
         o[Axis] = 0;
-        const EVoxelType P = Neighborhood->GetVoxel(vx + o[0], vy + o[1], vz + o[2]);
+        int32 pX = vx + o[0], pY = vy + o[1], pZ = vz + o[2];
 
-        bFace = (M == EVoxelType::Air) != (P == EVoxelType::Air);
+        const EVoxelType M = Neighborhood->GetVoxel(mX, mY, mZ);
+        const EVoxelType P = Neighborhood->GetVoxel(pX, pY, pZ);
+
+        if ((M == EVoxelType::Air) != (P == EVoxelType::Air))
+        {
+            if (IsCellExpectedAir(mX, mY, mZ) != IsCellExpectedAir(pX, pY, pZ))
+            {
+                bFace = true;
+            }
+        }
     }
     if (!bFace) return false;
 
@@ -1842,8 +1813,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         const int32 GroundNorth = GetGroundLevelLocal(lx, ly + 1, HeightGrid);
         const int32 GroundSouth = GetGroundLevelLocal(lx, ly - 1, HeightGrid);
 
-        // Fully buried and fully underground: no face can possibly be emitted, and the
-        // cliff test cannot fire either. Skipping here is what keeps solid rock cheap.
         if (!bAirTop && !bAirBottom && !bAirEast && !bAirWest && !bAirNorth && !bAirSouth &&
             lz <= GroundEast && lz <= GroundWest && lz <= GroundNorth && lz <= GroundSouth)
         {
@@ -1863,22 +1832,11 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         FVector v111 = GetSmoothVertexLocal(lx + 1, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
 
         float LocalTextureScale = TextureScale; float LocalCubeSize = CubeSize;
-
-        // Slivers below this go. The collapse mechanism depends on redundant quads
-     // shrinking to nothing, so some threshold is required; too low leaves hairline
-     // triangles (what you were seeing), too high leaves a hairline gap where a quad
-     // had not quite finished collapsing. 0.01 drops triangles under ~0.5% of a face.
         const double MinCross = 0.01 * (double)LocalCubeSize * (double)LocalCubeSize;
 
         auto AddQuadWorldSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D,
             int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
             {
-                // The diagonal is fixed in LATTICE space: always the corner with the
-                // smallest in-plane index to the one with the largest. Two quads meeting
-                // along an edge then split the same way even when they came from faces of
-                // different orientation. bDiagBD is false where the caller's winding
-                // starts at the min corner (top, east, south) and true where it does not
-                // (bottom, west, north).
                 const FVector* Tri[2][3];
                 if (!bDiagBD) { Tri[0][0] = &A; Tri[0][1] = &B; Tri[0][2] = &C;  Tri[1][0] = &A; Tri[1][1] = &C; Tri[1][2] = &D; }
                 else { Tri[0][0] = &B; Tri[0][1] = &C; Tri[0][2] = &D;  Tri[1][0] = &B; Tri[1][1] = &D; Tri[1][2] = &A; }
@@ -1951,7 +1909,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         {
             if (lz == GroundHere)
             {
-                // The real sky-facing surface: keeps its height-gradient normals.
                 FVector n00 = GetSmoothNormalLocal(lx, ly, HeightGrid);
                 FVector n10 = GetSmoothNormalLocal(lx + 1, ly, HeightGrid);
                 FVector n01 = GetSmoothNormalLocal(lx, ly + 1, HeightGrid);
@@ -1960,8 +1917,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             }
             else
             {
-                // A cave floor. Height-field normals are meaningless here, so it goes
-                // through the ordinary geometric-normal path like every other face.
                 AddQuadWorldSmooth(v001, v011, v111, v101, TopMatID, 0, 1, false);
             }
         }
@@ -2125,11 +2080,6 @@ void ASmoothVoxelTerrain::FVoxelChunk::UpdateVoxelMesh(int32 LocalX, int32 Local
             FDynamicMeshAttributeSet* GrassAttr = GrassMeshOut ? GrassMeshOut->Attributes() : nullptr;
             if (GrassAttr && GrassAttr->NumUVLayers() < 2) GrassAttr->SetNumUVLayers(2);
 
-            // The 3x3x3 block is exactly the set of voxels that share at least one corner
-            // with the edited voxel, i.e. every voxel whose geometry the pristine test can
-            // possibly change. The relaxation pass reads further out than that, but only
-            // from the procedural field, never from voxel data - so the rebuild radius
-            // stays at 3x3x3.
             for (int32 dz = -1; dz <= 1; ++dz) {
                 for (int32 dy = -1; dy <= 1; ++dy) {
                     for (int32 dx = -1; dx <= 1; ++dx) {
@@ -2206,16 +2156,12 @@ void ASmoothVoxelTerrain::FVoxelChunk::AddVoxelFaces(int32 LocalX, int32 LocalY,
     Neighborhood.NorthEastData = RetrieveVoxelDataPtr(FIntVector(1, 1, 0));
 
     FLocalHeightGrid HeightGrid;
-    HeightGrid.Heights = HeightMap ? HeightMap->GetData() : nullptr; HeightGrid.CacheSize = TerrainOwner->ChunkSize + 5;
+    HeightGrid.Heights = HeightMap ? HeightMap->GetData() : nullptr;
+    HeightGrid.CacheSize = TerrainOwner->ChunkSize + 5;
     FTriIDArray NewTriIDs;
 
-    // Held by value so the cache can safely point at it for the duration of the call.
     const FTerrainGenConfig Config = TerrainOwner->GetTerrainConfig();
 
-    // Reused across calls. A single edit runs this 27 times, and a fresh cache would
-    // allocate a few hundred KB each time; Init only memzeros when the arrays are
-    // already the right size. Game-thread only, and Init always runs before any read,
-    // so the pointers it holds are never stale at the point of use.
     static thread_local FCaveSmoothCache CaveCache;
     CaveCache.Init(&Config, &HeightGrid, &Neighborhood, Coord);
 
