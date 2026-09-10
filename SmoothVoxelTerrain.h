@@ -237,6 +237,11 @@ struct FCaveSmoothCache
 
     bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);
 
+    bool IsCellSmoothSurface(int32 cx, int32 cy, int32 cz);
+
+    int32 SmoothCell[3] = { MIN_int32, MIN_int32, MIN_int32 };
+    bool  bSmoothCellResult = false;
+
 
 private:
     static constexpr int32 SLAB_COUNT = 8;   // power of two; index is z & 7

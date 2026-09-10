@@ -1205,7 +1205,7 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
 
     if (!bSmoothTerrain) return RawGridPos;
 
-    // --- Rule 1: top-surface displacement ---
+    // --- Rule 1: top-surface displacement. Unchanged. ---
     if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) != EVoxelType::Air && VertZ > VoxZ)
     {
         if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ + 1) == EVoxelType::Air)
@@ -1217,53 +1217,20 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(int32 VertX, int32 VertY, int32 
         }
     }
 
-    // --- Rule 2: cave-wall displacement ---
-    if (CaveCache && CaveCache->IsReady())
+    // --- Rule 2: cave-wall displacement. ---
+    // Whether this voxel is smoothed at all is decided once, from world generation:
+    // it had to be on the generated cave surface. All eight of its corners then take the
+    // vertex's offset, which is itself a pure function of the vertex, so every smoothed
+    // voxel touching that vertex agrees on where it is. A voxel generation left buried
+    // takes no offset on any corner, at any time, and is a perfect cube from the start.
+    if (CaveCache && CaveCache->IsReady() && CaveCache->IsCellSmoothSurface(VoxX, VoxY, VoxZ))
     {
-        if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) != EVoxelType::Air)
+        FVector3f Off;
+        if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off))
         {
-            auto IsNaturalAir = [&](int32 cx, int32 cy, int32 cz) -> bool
-                {
-                    if (cz <= 0) return false;
-                    if (cz >= MaxHeight) return true;
-                    if (cz > GetGroundLevelLocal(cx, cy, HeightGrid)) return true;
-                    const float SurfHeight = GetSurfaceHeightLocal(cx, cy, HeightGrid);
-                    return IsInsideCave(ChunkCoord.X * ChunkSize + cx,
-                        ChunkCoord.Y * ChunkSize + cy,
-                        cz + BedrockLevel,
-                        SurfHeight);
-                };
-
-            // Player-placed blocks inside caves are not natural cave walls; they stay cubes
-            if (!IsNaturalAir(VoxX, VoxY, VoxZ))
-            {
-                const int32 dx = VertX - VoxX; // 0 or 1
-                const int32 dy = VertY - VoxY; // 0 or 1
-                const int32 dz = VertZ - VoxZ; // 0 or 1
-
-                const int32 nx = VoxX + (dx == 1 ? 1 : -1);
-                const int32 ny = VoxY + (dy == 1 ? 1 : -1);
-                const int32 nz = VoxZ + (dz == 1 ? 1 : -1);
-
-                // A corner is on a natural cave face only if that neighbor face is currently air
-                // AND was expected procedural cave air in world generation:
-                const bool bCaveX = (Neighborhood.GetVoxel(nx, VoxY, VoxZ) == EVoxelType::Air) && IsNaturalAir(nx, VoxY, VoxZ);
-                const bool bCaveY = (Neighborhood.GetVoxel(VoxX, ny, VoxZ) == EVoxelType::Air) && IsNaturalAir(VoxX, ny, VoxZ);
-                const bool bCaveZ = (Neighborhood.GetVoxel(VoxX, VoxY, nz) == EVoxelType::Air) && IsNaturalAir(VoxX, VoxY, nz);
-
-                // If this corner is not on an exposed natural cave face of this voxel,
-                // it is an unexposed/internal corner and must remain an exact flat cube corner:
-                if (bCaveX || bCaveY || bCaveZ)
-                {
-                    FVector3f Off;
-                    if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off))
-                    {
-                        return FVector((double)WorldX + (double)Off.X,
-                            (double)WorldY + (double)Off.Y,
-                            BaseZ + (double)Off.Z) * CubeSize;
-                    }
-                }
-            }
+            return FVector((double)WorldX + (double)Off.X,
+                (double)WorldY + (double)Off.Y,
+                BaseZ + (double)Off.Z) * CubeSize;
         }
     }
 
@@ -1501,7 +1468,28 @@ void FCaveSmoothCache::Init(const FTerrainGenConfig* InConfig, const FLocalHeigh
     VertOffsetCache.SetNumUninitialized(VertW * VertW * SLAB_COUNT);
     VertState.SetNumZeroed(VertW * VertW * SLAB_COUNT);
 
+    SmoothCell[0] = SmoothCell[1] = SmoothCell[2] = MIN_int32;
+
     bReady = true;
+}
+
+bool FCaveSmoothCache::IsCellSmoothSurface(int32 cx, int32 cy, int32 cz)
+{
+    if (!bReady) return false;
+
+    // Queried eight times in a row for the same voxel while its corners are built.
+    if (SmoothCell[0] == cx && SmoothCell[1] == cy && SmoothCell[2] == cz) return bSmoothCellResult;
+    SmoothCell[0] = cx; SmoothCell[1] = cy; SmoothCell[2] = cz;
+
+    // Generated state only. A voxel that world generation buried is never smoothed,
+    // no matter what the player later digs next to it.
+    bSmoothCellResult =
+        !IsCellExpectedAir(cx, cy, cz) &&
+        (IsCellExpectedAir(cx + 1, cy, cz) || IsCellExpectedAir(cx - 1, cy, cz) ||
+            IsCellExpectedAir(cx, cy + 1, cz) || IsCellExpectedAir(cx, cy - 1, cz) ||
+            IsCellExpectedAir(cx, cy, cz + 1) || IsCellExpectedAir(cx, cy, cz - 1));
+
+    return bSmoothCellResult;
 }
 
 float FCaveSmoothCache::GetCellDensity(int32 cx, int32 cy, int32 cz)
@@ -1685,12 +1673,8 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
     for (int32 a = 0; a < 3; ++a) if (Off[a] != 0.0f) { Axis = a; break; }
     if (Axis < 0) return false;
 
-    // A real exposed face perpendicular to the locked axis must touch this vertex,
-    // AND that face must have been an expected natural cave boundary in world generation.
-    // This ensures:
-    // 1. Unexposed voxels and player-mined rock faces have offset 0 (perfect cubes to begin with).
-    // 2. Natural cave walls stay smooth and never snap back.
-    // 3. All quads meeting at (vx, vy, vz) share the exact same 3D coordinate (NO GAPS or missing faces).
+    // A generation-time cave transition must straddle this vertex along the locked axis.
+   // Only generated state is read, so an edit can never move a vertex already in the mesh.
     bool bFace = false;
     for (int32 i = 0; i < 4 && !bFace; ++i)
     {
@@ -1699,20 +1683,11 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
         o[(Axis + 1) % 3] = (i & 1) - 1;
         o[(Axis + 2) % 3] = ((i >> 1) & 1) - 1;
 
-        int32 mX = vx + o[0], mY = vy + o[1], mZ = vz + o[2];
+        const int32 mX = vx + o[0], mY = vy + o[1], mZ = vz + o[2];
         o[Axis] = 0;
-        int32 pX = vx + o[0], pY = vy + o[1], pZ = vz + o[2];
+        const int32 pX = vx + o[0], pY = vy + o[1], pZ = vz + o[2];
 
-        const EVoxelType M = Neighborhood->GetVoxel(mX, mY, mZ);
-        const EVoxelType P = Neighborhood->GetVoxel(pX, pY, pZ);
-
-        if ((M == EVoxelType::Air) != (P == EVoxelType::Air))
-        {
-            if (IsCellExpectedAir(mX, mY, mZ) != IsCellExpectedAir(pX, pY, pZ))
-            {
-                bFace = true;
-            }
-        }
+        if (IsCellExpectedAir(mX, mY, mZ) != IsCellExpectedAir(pX, pY, pZ)) bFace = true;
     }
     if (!bFace) return false;
 
@@ -1904,6 +1879,73 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 }
             };
 
+        // Face corner order, as a bitmask per corner (bit0 = +X, bit1 = +Y, bit2 = +Z),
+        // matching the argument order of the quads emitted below.
+        static const int32 CornersTop[4] = { 4, 6, 7, 5 };
+        static const int32 CornersBottom[4] = { 1, 3, 2, 0 };
+        static const int32 CornersEast[4] = { 1, 5, 7, 3 };
+        static const int32 CornersWest[4] = { 2, 6, 4, 0 };
+        static const int32 CornersNorth[4] = { 3, 7, 6, 2 };
+        static const int32 CornersSouth[4] = { 0, 4, 5, 1 };
+
+        // Where a cubic voxel's face meets a smoothed face, the two rims sit apart by the
+        // vertex offset. This band closes that gap without moving either rim. It is always
+        // owned by the cubic side, so it is emitted exactly once, and its triangles land in
+        // this voxel's OutTriIDs so runtime edits remove them with the rest of the face.
+        auto EmitRimBands = [&](int32 FaceAxis, int32 FaceSign, const int32(&Corners)[4],
+            int32 MatID, int32 UAxis, int32 VAxis)
+            {
+                if (!CaveCache || !CaveCache->IsReady()) return;
+                if (CaveCache->IsCellSmoothSurface(lx, ly, lz)) return;
+
+                int32 QC[3] = { lx, ly, lz };
+                QC[FaceAxis] += FaceSign;
+
+                for (int32 i = 0; i < 4; ++i)
+                {
+                    const int32 c0 = Corners[i];
+                    const int32 c1 = Corners[(i + 1) & 3];
+
+                    const int32 V0[3] = { lx + (c0 & 1), ly + ((c0 >> 1) & 1), lz + ((c0 >> 2) & 1) };
+                    const int32 V1[3] = { lx + (c1 & 1), ly + ((c1 >> 1) & 1), lz + ((c1 >> 2) & 1) };
+
+                    int32 EdgeAxis = 0;
+                    while (EdgeAxis < 3 && V0[EdgeAxis] == V1[EdgeAxis]) ++EdgeAxis;
+                    if (EdgeAxis >= 3) continue;
+
+                    const int32 TAxis = 3 - FaceAxis - EdgeAxis;
+                    const int32 TSign = ((c0 >> TAxis) & 1) ? 1 : -1;
+
+                    int32 PT[3] = { lx, ly, lz };          PT[TAxis] += TSign;
+                    int32 QT[3] = { QC[0], QC[1], QC[2] }; QT[TAxis] += TSign;
+
+                    const bool bPTAir = Neighborhood.GetVoxel(PT[0], PT[1], PT[2]) == EVoxelType::Air;
+                    const bool bQTAir = Neighborhood.GetVoxel(QT[0], QT[1], QT[2]) == EVoxelType::Air;
+
+                    // The emitted face meeting ours at this edge, once per rotation direction.
+                    // The two coincide except at a diagonal pinch, where two sheets touch here.
+                    const int32* Adj[2] = { nullptr, nullptr };
+                    if (!bPTAir) Adj[0] = bQTAir ? PT : QT;
+                    if (!bQTAir) Adj[1] = QT; else if (!bPTAir) Adj[1] = PT;
+
+                    for (int32 k = 0; k < 2; ++k)
+                    {
+                        if (!Adj[k]) continue;
+                        if (k == 1 && Adj[0] == Adj[1]) continue;
+                        if (!CaveCache->IsCellSmoothSurface(Adj[k][0], Adj[k][1], Adj[k][2])) continue;
+
+                        const FVector R0 = GetSmoothVertexLocal(V0[0], V0[1], V0[2], lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FVector R1 = GetSmoothVertexLocal(V1[0], V1[1], V1[2], lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FVector S0 = GetSmoothVertexLocal(V0[0], V0[1], V0[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FVector S1 = GetSmoothVertexLocal(V1[0], V1[1], V1[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+
+                        // The band continues this face's surface past the rim, so it walks the
+                        // shared edge in the opposite direction to the face that owns it.
+                        AddQuadWorldSmooth(R1, R0, S0, S1, MatID, UAxis, VAxis, false);
+                    }
+                }
+            };
+
         // ---- TOP (+Z) ----
         if (bAirTop)
         {
@@ -1919,20 +1961,30 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             {
                 AddQuadWorldSmooth(v001, v011, v111, v101, TopMatID, 0, 1, false);
             }
+            EmitRimBands(2, 1, CornersTop, TopMatID, 0, 1);
         }
 
         // ---- BOTTOM (-Z) ----
-        if (bAirBottom) AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1, true);
+        if (bAirBottom)
+        {
+            AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1, true);
+            EmitRimBands(2, -1, CornersBottom, BottomMatID, 0, 1);
+        }
 
         const float ZOffsetEpsilon = 0.1f;
 
         auto EmitSide = [&](int32 nx, int32 ny, bool bNeighborAir, int32 NeighborGround,
             const FVector& A, const FVector& B, const FVector& C, const FVector& D,
-            int32 UAxis, int32 VAxis, bool bDiagBD)
+            int32 UAxis, int32 VAxis, bool bDiagBD,
+            int32 FaceAxis, int32 FaceSign, const int32(&Corners)[4])
             {
                 if (lz <= NeighborGround)
                 {
-                    if (bNeighborAir) AddQuadWorldSmooth(A, B, C, D, SideMatID, UAxis, VAxis, bDiagBD);
+                    if (bNeighborAir)
+                    {
+                        AddQuadWorldSmooth(A, B, C, D, SideMatID, UAxis, VAxis, bDiagBD);
+                        EmitRimBands(FaceAxis, FaceSign, Corners, SideMatID, UAxis, VAxis);
+                    }
                     return;
                 }
                 if (GetNeighborTopHeightLocal(nx, ny, lz, A, Neighborhood, HeightGrid) < A.Z - ZOffsetEpsilon ||
@@ -1944,10 +1996,10 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 }
             };
 
-        EmitSide(lx + 1, ly, bAirEast, GroundEast, v100, v101, v111, v110, 1, 2, false);
-        EmitSide(lx - 1, ly, bAirWest, GroundWest, v010, v011, v001, v000, 1, 2, true);
-        EmitSide(lx, ly + 1, bAirNorth, GroundNorth, v110, v111, v011, v010, 0, 2, true);
-        EmitSide(lx, ly - 1, bAirSouth, GroundSouth, v000, v001, v101, v100, 0, 2, false);
+        EmitSide(lx + 1, ly, bAirEast, GroundEast, v100, v101, v111, v110, 1, 2, false, 0, 1, CornersEast);
+        EmitSide(lx - 1, ly, bAirWest, GroundWest, v010, v011, v001, v000, 1, 2, true, 0, -1, CornersWest);
+        EmitSide(lx, ly + 1, bAirNorth, GroundNorth, v110, v111, v011, v010, 0, 2, true, 1, 1, CornersNorth);
+        EmitSide(lx, ly - 1, bAirSouth, GroundSouth, v000, v001, v101, v100, 0, 2, false, 1, -1, CornersSouth);
     }
 }
 
