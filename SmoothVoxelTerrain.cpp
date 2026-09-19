@@ -1634,7 +1634,6 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
     if (Axis < 0) return false;
 
     float T = Cross[Axis];
-    T *= FMath::Clamp(Config->CaveSettings.SmoothRelaxation, 0.0f, 1.0f);
 
     if (Axis == 2) T = FMath::Min(T, (float)GroundMin - (float)vz);
 

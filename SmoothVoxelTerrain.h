@@ -95,16 +95,6 @@ struct FCaveSettings
     // Master switch for cave-wall vertex displacement. Off = classic hard cubes.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Smoothing")
     bool bSmoothCaves = true;
-
-    // Tangential smoothing strength. 0 = raw surface-nets centroids (blocky but stable),
-    // 1 = full Laplacian. Above ~0.7 the surface starts losing volume.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Smoothing", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float SmoothRelaxation = 0.6f;
-
-    // Newton polish passes run AFTER relaxation, correcting the normal-direction error
-    // it introduces. 0 disables. Each pass costs 4 field evaluations.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Smoothing", meta = (ClampMin = "0", ClampMax = "4"))
-    int32 SmoothIterations = 2;
 };
 
 USTRUCT(BlueprintType)
