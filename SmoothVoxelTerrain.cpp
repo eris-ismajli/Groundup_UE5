@@ -610,7 +610,11 @@ void ASmoothVoxelTerrain::ProcessTasks()
 
                         FDynamicMeshNormalOverlay* Normals = Attr->PrimaryNormals();
                         int32 n0 = Normals->AppendElement(FVector3f(0.0f, 0.0f, 1.0f));
-                        Normals->SetTriangle(t1, FIndex3i(n0, n0, n0)); Normals->SetTriangle(t2, FIndex3i(n0, n0, n0));
+                        int32 n1 = Normals->AppendElement(FVector3f(0.0f, 0.0f, 1.0f));
+                        int32 n2 = Normals->AppendElement(FVector3f(0.0f, 0.0f, 1.0f));
+                        int32 n3 = Normals->AppendElement(FVector3f(0.0f, 0.0f, 1.0f));
+                        Normals->SetTriangle(t1, FIndex3i(n0, n1, n2));
+                        Normals->SetTriangle(t2, FIndex3i(n0, n2, n3));
                         Chunk->WaterMeshComponent->SetMesh(MoveTemp(WaterMesh));
                     }
                 }
@@ -1978,7 +1982,11 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             {
                 const int32 vA = Mesh.AppendVertex(FVector3d(A)), vB = Mesh.AppendVertex(FVector3d(B));
                 const int32 vC = Mesh.AppendVertex(FVector3d(C)), vD = Mesh.AppendVertex(FVector3d(D));
-                const int32 n = NormalOverlay->AppendElement(FixedNormal);
+                int32 n0 = NormalOverlay->AppendElement(FixedNormal);
+                int32 n1 = NormalOverlay->AppendElement(FixedNormal);
+                int32 n2 = NormalOverlay->AppendElement(FixedNormal);
+                int32 n3 = NormalOverlay->AppendElement(FixedNormal);
+
                 const int32 uA = UVOverlay->AppendElement(UVAt(A, UAxis, VAxis));
                 const int32 uB = UVOverlay->AppendElement(UVAt(B, UAxis, VAxis));
                 const int32 uC = UVOverlay->AppendElement(UVAt(C, UAxis, VAxis));
@@ -1987,7 +1995,7 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 const int32 t1 = Mesh.AppendTriangle(vA, vB, vC);
                 if (t1 != FDynamicMesh3::InvalidID) {
                     OutTriIDs.Add(t1);
-                    NormalOverlay->SetTriangle(t1, FIndex3i(n, n, n));
+                    NormalOverlay->SetTriangle(t1, FIndex3i(n0, n1, n2));
                     UVOverlay->SetTriangle(t1, FIndex3i(uA, uB, uC));
                     ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
                     if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
@@ -1995,10 +2003,10 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 const int32 t2 = Mesh.AppendTriangle(vA, vC, vD);
                 if (t2 != FDynamicMesh3::InvalidID) {
                     OutTriIDs.Add(t2);
-                    NormalOverlay->SetTriangle(t2, FIndex3i(n, n, n));
-                    UVOverlay->SetTriangle(t2, FIndex3i(uA, uC, uD));
-                    ColorOverlay->SetTriangle(t2, FIndex3i(cIdx, cIdx, cIdx));
-                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t2, MatID);
+                    NormalOverlay->SetTriangle(t2, FIndex3i(n0, n2, n3));
+                    UVOverlay->SetTriangle(t1, FIndex3i(uA, uB, uC));
+                    ColorOverlay->SetTriangle(t1, FIndex3i(cIdx, cIdx, cIdx));
+                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t1, MatID);
                 }
             };
 
@@ -2079,8 +2087,12 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 if (t == FDynamicMesh3::InvalidID) continue;
 
                 OutTriIDs.Add(t);
-                const int32 n = NormalOverlay->AppendElement(FVector3f(X[i].GetSafeNormal()));
-                NormalOverlay->SetTriangle(t, FIndex3i(n, n, n));
+                const FVector3f N(X[i].GetSafeNormal());
+                NormalOverlay->SetTriangle(t, FIndex3i(
+                    NormalOverlay->AppendElement(N),
+                    NormalOverlay->AppendElement(N),
+                    NormalOverlay->AppendElement(N)
+                ));
                 UVOverlay->SetTriangle(t, FIndex3i(UId[T[i][0]], UId[T[i][1]], UId[T[i][2]]));
                 ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
                 if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
@@ -2196,8 +2208,12 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                         if (t == FDynamicMesh3::InvalidID) continue;
 
                         OutTriIDs.Add(t);
-                        const int32 n = NormalOverlay->AppendElement(FVector3f(X.GetSafeNormal()));
-                        NormalOverlay->SetTriangle(t, FIndex3i(n, n, n));
+                        const FVector3f Nf(X.GetSafeNormal());
+                        NormalOverlay->SetTriangle(t, FIndex3i(
+                            NormalOverlay->AppendElement(Nf),
+                            NormalOverlay->AppendElement(Nf),
+                            NormalOverlay->AppendElement(Nf)
+                        ));
                         UVOverlay->SetTriangle(t, FIndex3i(UIdx[T[k][0]], UIdx[T[k][1]], UIdx[T[k][2]]));
                         ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
                         if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
@@ -2469,16 +2485,21 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
         float BendForce = (0.15f + 0.35f * RandBendForce) * Height;
 
         FDynamicMeshNormalOverlay* NormalOverlay = Attr->PrimaryNormals();
-        int32 nGround = NormalOverlay ? NormalOverlay->AppendElement(FVector3f(GroundNormal)) : -1;
 
         bool bLocalTwoSided = bTwoSidedGrass;
-        auto AddTri = [UVOverlay0, UVOverlay1, NormalOverlay, nGround, &Mesh, &OutTriIDs, bLocalTwoSided](
+        auto AddTri = [UVOverlay0, UVOverlay1, NormalOverlay, GroundNormal, &Mesh, &OutTriIDs, bLocalTwoSided](
             int32 a, int32 b, int32 c, int32 u0_A, int32 u0_B, int32 u0_C, int32 u1_A, int32 u1_B, int32 u1_C)
             {
                 int32 t = Mesh.AppendTriangle(a, b, c);
                 if (t != FDynamicMesh3::InvalidID) {
                     OutTriIDs.Add(t);
-                    if (NormalOverlay && nGround != -1) NormalOverlay->SetTriangle(t, FIndex3i(nGround, nGround, nGround));
+                    if (NormalOverlay) {
+                        NormalOverlay->SetTriangle(t, FIndex3i(
+                            NormalOverlay->AppendElement(FVector3f(GroundNormal)),
+                            NormalOverlay->AppendElement(FVector3f(GroundNormal)),
+                            NormalOverlay->AppendElement(FVector3f(GroundNormal))
+                        ));
+                    }
                     if (UVOverlay0 && u0_A != -1) UVOverlay0->SetTriangle(t, FIndex3i(u0_A, u0_B, u0_C));
                     if (UVOverlay1 && u1_A != -1) UVOverlay1->SetTriangle(t, FIndex3i(u1_A, u1_B, u1_C));
                 }
@@ -2486,7 +2507,13 @@ void FTerrainGenConfig::AppendGrassBladesLocal(int32 lx, int32 ly, int32 lz, FDy
                     int32 tBack = Mesh.AppendTriangle(a, c, b);
                     if (tBack != FDynamicMesh3::InvalidID) {
                         OutTriIDs.Add(tBack);
-                        if (NormalOverlay && nGround != -1) NormalOverlay->SetTriangle(tBack, FIndex3i(nGround, nGround, nGround));
+                        if (NormalOverlay) {
+                            NormalOverlay->SetTriangle(tBack, FIndex3i(
+                                NormalOverlay->AppendElement(FVector3f(GroundNormal)),
+                                NormalOverlay->AppendElement(FVector3f(GroundNormal)),
+                                NormalOverlay->AppendElement(FVector3f(GroundNormal))
+                            ));
+                        }
                         if (UVOverlay0 && u0_A != -1) UVOverlay0->SetTriangle(tBack, FIndex3i(u0_A, u0_C, u0_B));
                         if (UVOverlay1 && u1_A != -1) UVOverlay1->SetTriangle(tBack, FIndex3i(u1_A, u1_C, u1_B));
                     }
