@@ -15,16 +15,39 @@ using FTriIDArray = TArray<int32, TInlineAllocator<64>>;
 
 struct FChunkNeighborhood;
 struct FCaveSmoothCache;
+struct FVoxelEditContext;
+
+// One entry per voxel column over the chunk's halo, range [-2 .. ChunkSize+1].
+// Surface height and ground level are pure functions of the height field but were
+// recomputed from four corner reads on every query — ~30 times per voxel in the
+// mesher, plus once per cell per z in the cave cache. Built once, read everywhere.
+struct FColumnCache
+{
+    float Surface;
+    int32 Ground;
+};
 
 struct FLocalHeightGrid
 {
-    const float* Heights;
-    int32 CacheSize;
+    const float* Heights = nullptr;
+    const FColumnCache* Columns = nullptr;   // may be null: callers fall back to recompute
+    int32               CacheSize = 0;         // (ChunkSize + 5), indices [-2 .. CS+2]
+    int32               ColumnSize = 0;         // (ChunkSize + 4), indices [-2 .. CS+1]
+
     FORCEINLINE float GetHeight(int32 LocalX, int32 LocalY) const
     {
-        // Halo is now 2 columns: the relaxation pass reads cells two out from a
+        // Halo is 2 columns: the relaxation pass reads cells two out from a
         // chunk-edge vertex, and those cells need their own corner heights.
         return Heights[(LocalX + 2) + (LocalY + 2) * CacheSize];
+    }
+
+    FORCEINLINE const FColumnCache& GetColumn(int32 LocalX, int32 LocalY) const
+    {
+        // Clamped rather than asserted: IsCellExpectedAir probes one cell past the
+        // density cache's own range and only uses the result to reject.
+        const int32 cx = FMath::Clamp(LocalX + 2, 0, ColumnSize - 1);
+        const int32 cy = FMath::Clamp(LocalY + 2, 0, ColumnSize - 1);
+        return Columns[cx + cy * ColumnSize];
     }
 };
 
@@ -203,6 +226,22 @@ struct FTerrainGenConfig
     int32 CavePatchSubdiv = 2;
     float CavePatchFlatDot = 0.99f;
 
+    // Seed-derived constants. These were being recomputed with Hash2D/Hash3D on every
+// density sample — about 20 hashes per voxel for values that depend only on Seed.
+    struct FCaveOffsets
+    {
+        float Entrance[2];
+        float Macro[3];
+        float T1[6];
+        float T2[6];
+        float Chamber[2][3];
+    };
+    FCaveOffsets CaveOff;
+    float InvCubeSize = 0.01f;
+
+    // Must be called once after all plain fields are filled in.
+    void PrepareDerived();
+
     FSmoothVertex GetSmoothVertexEx(int32 VertX, int32 VertY, int32 VertZ,
         int32 VoxX, int32 VoxY, int32 VoxZ,
         const FLocalHeightGrid& HeightGrid,
@@ -303,6 +342,14 @@ public:
 
         TSharedPtr<TArray<EVoxelType>, ESPMode::ThreadSafe> VoxelData;
         TSharedPtr<TArray<float>, ESPMode::ThreadSafe> HeightMap;
+        TSharedPtr<TArray<FColumnCache>, ESPMode::ThreadSafe> Columns;
+
+        // Exclusive upper bound of any solid voxel in this chunk. The mesher's z loop
+        // stops here instead of walking all MaxHeight planes of guaranteed air.
+        int32 MaxSolidZ = 0;
+
+        void BuildEditContext(FVoxelEditContext& OutCtx, ASmoothVoxelTerrain* TerrainOwner);
+        void AddVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3* GrassMesh, ASmoothVoxelTerrain* TerrainOwner, FVoxelEditContext& Ctx);
 
         TMap<int32, FTriIDArray> VoxelTriangles;
         TMap<int32, FTriIDArray> GrassVoxelTriangles;
@@ -314,7 +361,6 @@ public:
         void UpdateVoxel(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
         void UpdateVoxelMesh(int32 LocalX, int32 LocalY, int32 LocalZ, EVoxelType NewType, ASmoothVoxelTerrain* TerrainOwner);
         void RemoveVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3* GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
-        void AddVoxelFaces(int32 LocalX, int32 LocalY, int32 LocalZ, UE::Geometry::FDynamicMesh3& Mesh, UE::Geometry::FDynamicMesh3* GrassMesh, ASmoothVoxelTerrain* TerrainOwner);
         void UpdateSharedFace(int32 LocalX, int32 LocalY, int32 LocalZ, ASmoothVoxelTerrain* TerrainOwner, const FIntVector& NeighborDirection);
     };
 
@@ -349,6 +395,9 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
     int32 MaxMeshApplyPerFrame = 1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Procedural Generation")
+    int32 MaxCollisionUpdatesPerFrame = 2;
 
     FIntVector LastPlayerChunkCoord = FIntVector(999999, 999999, 999999);
 
@@ -487,7 +536,8 @@ private:
     void WorldToLocalVoxel(const FVector& WorldPos, const FIntVector& ChunkCoord, int32& OutX, int32& OutY, int32& OutZ) const;
     FVector ChunkCoordToWorldOrigin(const FIntVector& ChunkCoord) const;
 
-    bool bCollisionDirty = false;
+    TArray<TWeakObjectPtr<UDynamicMeshComponent>> PendingCollisionUpdates;
+    void MarkCollisionDirty(UDynamicMeshComponent* Comp);
     void UpdateCollisionIfNeeded();
     bool bIsDestroyed = false;
 
