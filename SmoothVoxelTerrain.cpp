@@ -670,6 +670,8 @@ FTerrainGenConfig ASmoothVoxelTerrain::GetTerrainConfig() const
     Config.GrassMinWidth = GrassMinWidth; Config.GrassMaxWidth = GrassMaxWidth;
     Config.GrassDensityNoiseScale = GrassDensityNoiseScale; Config.GrassBladeSegments = GrassBladeSegments;
     Config.bTwoSidedGrass = bTwoSidedGrass; Config.TextureScale = TextureScale;
+    Config.bBendCaveFaces = bBendCaveFaces; Config.CavePatchSubdiv = CavePatchSubdiv;
+    Config.CavePatchFlatDot = CavePatchFlatDot;
     return Config;
 }
 
@@ -1299,6 +1301,61 @@ int32 FTerrainGenConfig::GetGroundLevelLocal(int32 LocalX, int32 LocalY, const F
     return FMath::Clamp(FMath::FloorToInt(GetSurfaceHeightLocal(LocalX, LocalY, G) - MinGrassThickness) - BedrockLevel, 0, MaxHeight - 1);
 }
 
+FSmoothVertex FTerrainGenConfig::GetSmoothVertexEx(
+    int32 VertX, int32 VertY, int32 VertZ,
+    int32 VoxX, int32 VoxY, int32 VoxZ,
+    const FLocalHeightGrid& HeightGrid,
+    const FChunkNeighborhood& Neighborhood,
+    const FIntVector& ChunkCoord,
+    FCaveSmoothCache* CaveCache) const
+{
+    FSmoothVertex Out;
+
+    const int32  WorldX = ChunkCoord.X * ChunkSize + VertX;
+    const int32  WorldY = ChunkCoord.Y * ChunkSize + VertY;
+    const double BaseZ = (double)(VertZ + BedrockLevel);
+    Out.P = FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
+
+    if (!bSmoothTerrain) return Out;
+
+    // Every call site passes a solid cell (the mesher skips Air, and the rim bands
+    // pick their adjacent cell behind a !bAir test), so an Air cell here is a
+    // caller bug, not a vertex to displace.
+    if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) == EVoxelType::Air) return Out;
+
+    // --- Surface displacement: top cap of the generated ground voxel only ---
+    // A cell above the ground voxel is something the player placed. It keeps its
+    // lattice position, so its vertical edges are always exactly one voxel long.
+    // The lip between its bottom plane and the terrain surface is closed by the
+    // skirt bands in AppendVoxelFacesLocal, not by dragging vertices off the grid.
+    // This branch never reports bCurved: the height field owns that geometry and its
+    // edges must stay straight so they meet the flat top cap exactly.
+    if (VertZ > VoxZ && VoxZ == GetGroundLevelLocal(VoxX, VoxY, HeightGrid))
+    {
+        Out.P = FVector((double)WorldX,
+            (double)WorldY,
+            (double)HeightGrid.GetHeight(VertX, VertY)) * CubeSize;
+        return Out;
+    }
+
+    // --- Cave-wall displacement (generated state only) ---
+    if (CaveCache && CaveCache->IsReady() && CaveCache->IsCellSmoothSurface(VoxX, VoxY, VoxZ))
+    {
+        FVector3f Off, Nrm;
+        if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off, Nrm))
+        {
+            Out.P = FVector((double)WorldX + (double)Off.X,
+                (double)WorldY + (double)Off.Y,
+                BaseZ + (double)Off.Z) * CubeSize;
+            Out.N = Nrm;
+            Out.bCurved = !Nrm.IsNearlyZero();
+            return Out;
+        }
+    }
+
+    return Out;
+}
+
 FVector FTerrainGenConfig::GetSmoothVertexLocal(
     int32 VertX, int32 VertY, int32 VertZ,
     int32 VoxX, int32 VoxY, int32 VoxZ,
@@ -1307,43 +1364,8 @@ FVector FTerrainGenConfig::GetSmoothVertexLocal(
     const FIntVector& ChunkCoord,
     FCaveSmoothCache* CaveCache) const
 {
-    const int32  WorldX = ChunkCoord.X * ChunkSize + VertX;
-    const int32  WorldY = ChunkCoord.Y * ChunkSize + VertY;
-    const double BaseZ = (double)(VertZ + BedrockLevel);
-    const FVector RawGridPos = FVector((double)WorldX, (double)WorldY, BaseZ) * CubeSize;
-
-    if (!bSmoothTerrain) return RawGridPos;
-
-    // Every call site passes a solid cell (the mesher skips Air, and the rim bands
-    // pick their adjacent cell behind a !bAir test), so an Air cell here is a
-    // caller bug, not a vertex to displace.
-    if (Neighborhood.GetVoxel(VoxX, VoxY, VoxZ) == EVoxelType::Air) return RawGridPos;
-
-    // --- Surface displacement: top cap of the generated ground voxel only ---
-    // A cell above the ground voxel is something the player placed. It keeps its
-    // lattice position, so its vertical edges are always exactly one voxel long.
-    // The lip between its bottom plane and the terrain surface is closed by the
-    // skirt bands in AppendVoxelFacesLocal, not by dragging vertices off the grid.
-    if (VertZ > VoxZ && VoxZ == GetGroundLevelLocal(VoxX, VoxY, HeightGrid))
-    {
-        return FVector((double)WorldX,
-            (double)WorldY,
-            (double)HeightGrid.GetHeight(VertX, VertY)) * CubeSize;
-    }
-
-    // --- Cave-wall displacement (generated state only) ---
-    if (CaveCache && CaveCache->IsReady() && CaveCache->IsCellSmoothSurface(VoxX, VoxY, VoxZ))
-    {
-        FVector3f Off;
-        if (CaveCache->GetVertexOffset(VertX, VertY, VertZ, Off))
-        {
-            return FVector((double)WorldX + (double)Off.X,
-                (double)WorldY + (double)Off.Y,
-                BaseZ + (double)Off.Z) * CubeSize;
-        }
-    }
-
-    return RawGridPos;
+    return GetSmoothVertexEx(VertX, VertY, VertZ, VoxX, VoxY, VoxZ,
+        HeightGrid, Neighborhood, ChunkCoord, CaveCache).P;
 }
 
 FVector FTerrainGenConfig::GetSmoothNormalLocal(int32 VertX, int32 VertY, const FLocalHeightGrid& HeightGrid) const
@@ -1522,10 +1544,12 @@ void FCaveSmoothCache::Init(const FTerrainGenConfig* InConfig, const FLocalHeigh
 
     BaseSlabZ.Init(MIN_int32, SLAB_COUNT);
     BaseOffsetCache.SetNumUninitialized(BaseW * BaseW * SLAB_COUNT);
+    BaseNormalCache.SetNumUninitialized(BaseW * BaseW * SLAB_COUNT);
     BaseState.SetNumZeroed(BaseW * BaseW * SLAB_COUNT);
 
     VertSlabZ.Init(MIN_int32, SLAB_COUNT);
     VertOffsetCache.SetNumUninitialized(VertW * VertW * SLAB_COUNT);
+    VertNormalCache.SetNumUninitialized(VertW * VertW * SLAB_COUNT);
     VertState.SetNumZeroed(VertW * VertW * SLAB_COUNT);
 
     SmoothCell[0] = SmoothCell[1] = SmoothCell[2] = MIN_int32;
@@ -1597,7 +1621,7 @@ float FCaveSmoothCache::VertexSurfaceHeight(int32 vx, int32 vy) const
             Config->GetSurfaceHeightLocal(vx, vy, *Heights)));
 }
 
-bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
+bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal)
 {
     if (vx < -1 || vx > CS + 1 || vy < -1 || vy > CS + 1) return false;
     if (vz < 1 || vz >= Config->MaxHeight) return false;
@@ -1612,7 +1636,7 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
 
     const int32 I = S * Plane + (vx + 1) + (vy + 1) * BaseW;
     if (BaseState[I] == 1) return false;
-    if (BaseState[I] == 2) { OutOffset = BaseOffsetCache[I]; return true; }
+    if (BaseState[I] == 2) { OutOffset = BaseOffsetCache[I]; OutNormal = BaseNormalCache[I]; return true; }
 
     BaseState[I] = 1;
 
@@ -1634,6 +1658,18 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
             if (D[c] > 0.0f) bAnyAir = true; else bAnySolid = true;
         }
         if (!bAnyAir || !bAnySolid) return false;
+    }
+
+    // Central difference of the eight cell densities across the unit cube. The corner bit
+    // layout is the same one CaveCubeCorner uses, so each sum is one face group of the cube.
+    // D > 0 is air, so the gradient already points out of the solid and needs no negation.
+    {
+        const FVector3f Grad(
+            (D[1] + D[3] + D[5] + D[7]) - (D[0] + D[2] + D[4] + D[6]),
+            (D[2] + D[3] + D[6] + D[7]) - (D[0] + D[1] + D[4] + D[5]),
+            (D[4] + D[5] + D[6] + D[7]) - (D[0] + D[1] + D[2] + D[3]));
+
+        OutNormal = (Grad.SizeSquared() > 1.e-12f) ? Grad.GetUnsafeNormal() : FVector3f::ZeroVector;
     }
 
     // Every edge that changes sign contributes its linearly interpolated crossing, and the
@@ -1670,11 +1706,12 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
     OutOffset.Z = FMath::Min(OutOffset.Z, (float)GroundMin - (float)vz);
 
     BaseOffsetCache[I] = OutOffset;
+    BaseNormalCache[I] = OutNormal;
     BaseState[I] = 2;
     return true;
 }
 
-bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset)
+bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal)
 {
     if (!bReady) return false;
     if (vx < 0 || vx > CS || vy < 0 || vy > CS) return false;
@@ -1690,24 +1727,25 @@ bool FCaveSmoothCache::GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& 
 
     const int32 I = S * Plane + vx + vy * VertW;
     if (VertState[I] == 1) return false;
-    if (VertState[I] == 2) { OutOffset = VertOffsetCache[I]; return true; }
+    if (VertState[I] == 2) { OutOffset = VertOffsetCache[I]; OutNormal = VertNormalCache[I]; return true; }
 
     VertState[I] = 1;
-    FVector3f Off;
-    if (!GetBaseOffset(vx, vy, vz, Off)) return false;
+    FVector3f Off, Nrm;
+    if (!GetBaseOffset(vx, vy, vz, Off, Nrm)) return false;
 
-    // GetBaseOffset now succeeds only when at least one edge of the cell cube crosses the
+    // GetBaseOffset succeeds only when at least one edge of the cell cube crosses the
     // generated air/solid boundary, which is the old straddle condition without a preferred
     // axis. It still reads generated state only, so an edit can never move a vertex that is
     // already in the mesh.
     if (!FMath::IsFinite(Off.X) || !FMath::IsFinite(Off.Y) || !FMath::IsFinite(Off.Z)) return false;
 
     VertOffsetCache[I] = Off;
+    VertNormalCache[I] = Nrm;
     VertState[I] = 2;
     OutOffset = Off;
+    OutNormal = Nrm;
     return true;
 }
-
 FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos, EVoxelType VoxelType) const
 {
     float VoxX = (float)WorldPos.X / CubeSize, VoxY = (float)WorldPos.Y / CubeSize, VoxZ = (float)WorldPos.Z / CubeSize;
@@ -1808,25 +1846,36 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         FLinearColor VoxelColor = GetStylizedColorForVoxel(FVector((double)WorldX * CubeSize + (0.5 * CubeSize), (double)WorldY * CubeSize + (0.5 * CubeSize), (double)WorldZ * CubeSize), CurrentType);
         int32 cIdx = ColorOverlay->AppendElement(FVector4f(VoxelColor));
 
-        FVector v000 = GetSmoothVertexLocal(lx, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v100 = GetSmoothVertexLocal(lx + 1, ly, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v010 = GetSmoothVertexLocal(lx, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v110 = GetSmoothVertexLocal(lx + 1, ly + 1, lz, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v001 = GetSmoothVertexLocal(lx, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v101 = GetSmoothVertexLocal(lx + 1, ly, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v011 = GetSmoothVertexLocal(lx, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-        FVector v111 = GetSmoothVertexLocal(lx + 1, ly + 1, lz + 1, lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        // Corner code c = x | (y << 1) | (z << 2) — the same layout CaveCubeCorner and the
+        // Corners* tables below already use, so a face can be named by its corner table alone.
+        FSmoothVertex CV[8];
+        for (int32 c = 0; c < 8; ++c)
+        {
+            CV[c] = GetSmoothVertexEx(lx + (c & 1), ly + ((c >> 1) & 1), lz + ((c >> 2) & 1),
+                lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+        }
+
+        const FVector& v000 = CV[0].P; const FVector& v100 = CV[1].P;
+        const FVector& v010 = CV[2].P; const FVector& v110 = CV[3].P;
+        const FVector& v001 = CV[4].P; const FVector& v101 = CV[5].P;
+        const FVector& v011 = CV[6].P; const FVector& v111 = CV[7].P;
 
         float LocalTextureScale = TextureScale; float LocalCubeSize = CubeSize;
         const double MinCross = 0.01 * (double)LocalCubeSize * (double)LocalCubeSize;
+
+        auto UVAt = [&](const FVector& P, int32 UAxis, int32 VAxis)
+            {
+                return FVector2f((float)P[UAxis] / LocalCubeSize * LocalTextureScale,
+                    (float)P[VAxis] / LocalCubeSize * LocalTextureScale);
+            };
 
         auto AddQuadWorldSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D,
             int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
             {
                 // Both splits preserve the loop winding, so the diagonal is free to follow the
-// geometry. On a displaced quad the shorter diagonal runs along the wall instead
-// of cutting across it, which is what gives cave surfaces their creased look.
-// Planar quads tie exactly and keep the caller's choice.
+                // geometry. On a displaced quad the shorter diagonal runs along the wall instead
+                // of cutting across it, which is what gives cave surfaces their creased look.
+                // Planar quads tie exactly and keep the caller's choice.
                 const double DiagAC = FVector::DistSquared(A, C);
                 const double DiagBD = FVector::DistSquared(B, D);
                 if (DiagAC < DiagBD)      bDiagBD = false;
@@ -1835,11 +1884,6 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 const FVector* Tri[2][3];
                 if (!bDiagBD) { Tri[0][0] = &A; Tri[0][1] = &B; Tri[0][2] = &C;  Tri[1][0] = &A; Tri[1][1] = &C; Tri[1][2] = &D; }
                 else { Tri[0][0] = &B; Tri[0][1] = &C; Tri[0][2] = &D;  Tri[1][0] = &B; Tri[1][1] = &D; Tri[1][2] = &A; }
-
-                auto UVOf = [&](const FVector& P) {
-                    return FVector2f((float)P[UAxis] / LocalCubeSize * LocalTextureScale,
-                        (float)P[VAxis] / LocalCubeSize * LocalTextureScale);
-                    };
 
                 for (int32 i = 0; i < 2; ++i)
                 {
@@ -1863,11 +1907,148 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                         NormalOverlay->AppendElement(N),
                         NormalOverlay->AppendElement(N)));
                     UVOverlay->SetTriangle(t, FIndex3i(
-                        UVOverlay->AppendElement(UVOf(P0)),
-                        UVOverlay->AppendElement(UVOf(P1)),
-                        UVOverlay->AppendElement(UVOf(P2))));
+                        UVOverlay->AppendElement(UVAt(P0, UAxis, VAxis)),
+                        UVOverlay->AppendElement(UVAt(P1, UAxis, VAxis)),
+                        UVOverlay->AppendElement(UVAt(P2, UAxis, VAxis))));
                     ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
                     if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
+                }
+            };
+
+        // A curved replacement for AddQuadWorldSmooth. The quad's corners map to
+    // A=(u0,v0) B=(u1,v0) C=(u1,v1) D=(u0,v1), so the sub-cell winding below matches
+    // the caller's loop order exactly and the shorter-diagonal rule still applies.
+        auto AddPatchSmooth = [&](const FSmoothVertex& A, const FSmoothVertex& B,
+            const FSmoothVertex& C, const FSmoothVertex& Dv,
+            int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
+            {
+                // Whether an edge bends must depend only on that lattice edge and its two
+                // endpoints, never on the patch that happens to own it. Both tests here read the
+                // endpoints alone: their provenance, and the angle between their field normals.
+                // A face of the neighbouring cell walking the same edge computes the same answer,
+                // so the two patches trace the identical boundary curve.
+                auto EdgeBends = [&](const FSmoothVertex& P0, const FSmoothVertex& P1)
+                    {
+                        if (!bBendCaveFaces) return false;
+                        // A height-field or raw lattice endpoint keeps the edge straight, which is
+                        // what the top cap, the rim bands and the skirt assume about shared edges.
+                        if (!P0.bCurved || !P1.bCurved) return false;
+                        // Already flat: bending it would move the surface by nothing and cost a row.
+                        return FVector3f::DotProduct(P0.N, P1.N) < CavePatchFlatDot;
+                    };
+
+                const bool bEdgeAB = EdgeBends(A, B);    // v = 0
+                const bool bEdgeBC = EdgeBends(B, C);    // u = 1
+                const bool bEdgeDC = EdgeBends(Dv, C);   // v = 1
+                const bool bEdgeAD = EdgeBends(A, Dv);   // u = 0
+
+                // The sample count along a shared edge has to be a function of the edge too, so it
+                // is uniform. Two neighbours share only two of their four corners, so any count
+                // derived from the patch's own curvature puts different sample points on the same
+                // curve and opens a crack the width of its sagitta. Dropping to one cell when every
+                // edge is straight is still safe: a neighbour's extra samples along a straight edge
+                // land exactly on it.
+                const int32 N = (bEdgeAB || bEdgeBC || bEdgeDC || bEdgeAD)
+                    ? FMath::Clamp(CavePatchSubdiv, 1, 4)
+                    : 1;
+
+                if (N == 1)
+                {
+                    AddQuadWorldSmooth(A.P, B.P, C.P, Dv.P, MatID, UAxis, VAxis, bDiagBD);
+                    return;
+                }
+
+                // Cubic Bezier boundary, PN tangent-plane rule. Swapping the endpoints swaps the
+                // two control points and reverses the parameter, so the neighbouring face walking
+                // this edge backwards traces the identical curve.
+                auto EdgePoint = [](const FSmoothVertex& P0, const FSmoothVertex& P1, double t, bool bCurve) -> FVector
+                    {
+                        if (!bCurve) return FMath::Lerp(P0.P, P1.P, t);
+                        const FVector d = P1.P - P0.P;
+                        const FVector n0((double)P0.N.X, (double)P0.N.Y, (double)P0.N.Z);
+                        const FVector n1((double)P1.N.X, (double)P1.N.Y, (double)P1.N.Z);
+                        const FVector b1 = (2.0 * P0.P + P1.P - FVector::DotProduct(d, n0) * n0) / 3.0;
+                        const FVector b2 = (2.0 * P1.P + P0.P + FVector::DotProduct(d, n1) * n1) / 3.0;
+                        const double s = 1.0 - t;
+                        return s * s * s * P0.P + 3.0 * s * s * t * b1 + 3.0 * s * t * t * b2 + t * t * t * P1.P;
+                    };
+
+                // Coons patch. It reproduces the four boundary curves exactly, pins the corners
+                // exactly, needs no interior control points, and collapses to the plain bilinear
+                // quad when every edge is straight.
+                auto PatchPoint = [&](double u, double v) -> FVector
+                    {
+                        const FVector Cu0 = EdgePoint(A, B, u, bEdgeAB);
+                        const FVector Cu1 = EdgePoint(Dv, C, u, bEdgeDC);
+                        const FVector Cv0 = EdgePoint(A, Dv, v, bEdgeAD);
+                        const FVector Cv1 = EdgePoint(B, C, v, bEdgeBC);
+                        const FVector Bl = (1.0 - u) * (1.0 - v) * A.P + u * (1.0 - v) * B.P
+                            + u * v * C.P + (1.0 - u) * v * Dv.P;
+                        return (1.0 - v) * Cu0 + v * Cu1 + (1.0 - u) * Cv0 + u * Cv1 - Bl;
+                    };
+
+                const int32 Stride = N + 1;
+                TArray<FVector, TInlineAllocator<25>> VPos; VPos.SetNumUninitialized(Stride * Stride);
+                TArray<int32, TInlineAllocator<25>>   VIdx; VIdx.SetNumUninitialized(Stride * Stride);
+
+                for (int32 j = 0; j <= N; ++j)
+                {
+                    for (int32 i = 0; i <= N; ++i)
+                    {
+                        const FVector P = PatchPoint((double)i / (double)N, (double)j / (double)N);
+                        VPos[i + j * Stride] = P;
+                        // Appended once and shared by every sub-triangle that touches it.
+                        VIdx[i + j * Stride] = Mesh.AppendVertex(FVector3d(P));
+                    }
+                }
+
+                // Sub-triangles are 1/N^2 of the original area, so the degeneracy floor has to
+                // shrink with them or valid slivers get dropped and punch holes in the wall.
+                const double SubMinCross = MinCross / (double)(N * N);
+
+                for (int32 j = 0; j < N; ++j)
+                {
+                    for (int32 i = 0; i < N; ++i)
+                    {
+                        const int32 q0 = i + j * Stride;                 // A-like
+                        const int32 q1 = (i + 1) + j * Stride;           // B-like
+                        const int32 q2 = (i + 1) + (j + 1) * Stride;     // C-like
+                        const int32 q3 = i + (j + 1) * Stride;           // D-like
+
+                        const double dAC = FVector::DistSquared(VPos[q0], VPos[q2]);
+                        const double dBD = FVector::DistSquared(VPos[q1], VPos[q3]);
+                        const bool bSub = (dAC < dBD) ? false : ((dBD < dAC) ? true : bDiagBD);
+
+                        int32 T[2][3];
+                        if (!bSub) { T[0][0] = q0; T[0][1] = q1; T[0][2] = q2;  T[1][0] = q0; T[1][1] = q2; T[1][2] = q3; }
+                        else { T[0][0] = q1; T[0][1] = q2; T[0][2] = q3;  T[1][0] = q1; T[1][1] = q3; T[1][2] = q0; }
+
+                        for (int32 k = 0; k < 2; ++k)
+                        {
+                            const FVector& P0 = VPos[T[k][0]];
+                            const FVector& P1 = VPos[T[k][1]];
+                            const FVector& P2 = VPos[T[k][2]];
+
+                            const FVector X = FVector::CrossProduct(P2 - P0, P1 - P0);
+                            if (X.Size() <= SubMinCross) continue;
+
+                            const int32 t = Mesh.AppendTriangle(VIdx[T[k][0]], VIdx[T[k][1]], VIdx[T[k][2]]);
+                            if (t == FDynamicMesh3::InvalidID) continue;
+
+                            OutTriIDs.Add(t);
+                            const FVector3f Nf(X.GetSafeNormal());
+                            NormalOverlay->SetTriangle(t, FIndex3i(
+                                NormalOverlay->AppendElement(Nf),
+                                NormalOverlay->AppendElement(Nf),
+                                NormalOverlay->AppendElement(Nf)));
+                            UVOverlay->SetTriangle(t, FIndex3i(
+                                UVOverlay->AppendElement(UVAt(P0, UAxis, VAxis)),
+                                UVOverlay->AppendElement(UVAt(P1, UAxis, VAxis)),
+                                UVOverlay->AppendElement(UVAt(P2, UAxis, VAxis))));
+                            ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
+                            if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
+                        }
+                    }
                 }
             };
 
@@ -1907,8 +2088,8 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         static const int32 CornersSouth[4] = { 0, 4, 5, 1 };
 
         // Faces of a cell share edges, so the same (edge, neighbouring cell) band is reachable
-// from two faces - 12 of the 36 possible bands are - and the two copies land on top of
-// each other with opposite windings. A cell emits at most 24 bands, so this is enough.
+        // from two faces - 12 of the 36 possible bands are - and the two copies land on top of
+        // each other with opposite windings. A cell emits at most 24 bands, so this is enough.
         uint16 EmittedBands[24];
         int32 NumEmittedBands = 0;
 
@@ -1962,14 +2143,18 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                         if (bAlready) continue;
                         if (NumEmittedBands < UE_ARRAY_COUNT(EmittedBands)) EmittedBands[NumEmittedBands++] = BandKey;
 
-                        const FVector R0 = GetSmoothVertexLocal(V0[0], V0[1], V0[2], lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-                        const FVector R1 = GetSmoothVertexLocal(V1[0], V1[1], V1[2], lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-                        const FVector S0 = GetSmoothVertexLocal(V0[0], V0[1], V0[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
-                        const FVector S1 = GetSmoothVertexLocal(V1[0], V1[1], V1[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FSmoothVertex R0 = GetSmoothVertexEx(V0[0], V0[1], V0[2], lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FSmoothVertex R1 = GetSmoothVertexEx(V1[0], V1[1], V1[2], lx, ly, lz, HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FSmoothVertex S0 = GetSmoothVertexEx(V0[0], V0[1], V0[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
+                        const FSmoothVertex S1 = GetSmoothVertexEx(V1[0], V1[1], V1[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
 
                         // The band continues this face's surface past the rim, so it walks the
                         // shared edge in the opposite direction to the face that owns it.
-                        AddQuadWorldSmooth(R1, R0, S0, S1, MatID, UAxis, VAxis, false);
+                        // R0/R1 come from the non-smooth owning cell and report bCurved false, so
+                        // only the S0-S1 edge bends: the band becomes a ruled surface from the
+                        // straight lattice rim onto the cave wall, and its curved edge is the same
+                        // curve the adjacent smooth cell traces along that lattice edge.
+                        AddPatchSmooth(R1, R0, S0, S1, MatID, UAxis, VAxis, false);
                     }
                 }
             };
@@ -1987,7 +2172,7 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             }
             else
             {
-                AddQuadWorldSmooth(v001, v011, v111, v101, TopMatID, 0, 1, false);
+                AddPatchSmooth(CV[4], CV[6], CV[7], CV[5], TopMatID, 0, 1, false);
             }
             EmitRimBands(2, 1, CornersTop, TopMatID, 0, 1);
         }
@@ -1995,16 +2180,15 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         // ---- BOTTOM (-Z) ----
         if (bAirBottom)
         {
-            AddQuadWorldSmooth(v100, v110, v010, v000, BottomMatID, 0, 1, true);
+            AddPatchSmooth(CV[1], CV[3], CV[2], CV[0], BottomMatID, 0, 1, true);
             EmitRimBands(2, -1, CornersBottom, BottomMatID, 0, 1);
         }
 
         const float ZOffsetEpsilon = 0.1f;
 
         auto EmitSide = [&](int32 nx, int32 ny, bool bNeighborAir, int32 NeighborGround,
-            const FVector& A, const FVector& B, const FVector& C, const FVector& D,
-            int32 UAxis, int32 VAxis, bool bDiagBD,
-            int32 FaceAxis, int32 FaceSign, const int32(&Corners)[4])
+            const int32(&Corners)[4], int32 UAxis, int32 VAxis, bool bDiagBD,
+            int32 FaceAxis, int32 FaceSign)
             {
                 // A solid neighbour inside its own generated column hides this side completely.
                 // The height comparison below assumes lattice-aligned face vertices, so a cave
@@ -2014,17 +2198,22 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 // that is the placed-block-on-a-slope lip it was written for.
                 if (!bNeighborAir && lz <= NeighborGround) return;
 
-                float nZA = GetNeighborTopHeightLocal(nx, ny, lz, A, Neighborhood, HeightGrid);
-                float nZB = GetNeighborTopHeightLocal(nx, ny, lz, B, Neighborhood, HeightGrid);
-                float nZC = GetNeighborTopHeightLocal(nx, ny, lz, C, Neighborhood, HeightGrid);
-                float nZD = GetNeighborTopHeightLocal(nx, ny, lz, D, Neighborhood, HeightGrid);
+                const FSmoothVertex& A = CV[Corners[0]];
+                const FSmoothVertex& B = CV[Corners[1]];
+                const FSmoothVertex& C = CV[Corners[2]];
+                const FSmoothVertex& D = CV[Corners[3]];
 
-                if (nZA < A.Z - ZOffsetEpsilon ||
-                    nZB < B.Z - ZOffsetEpsilon ||
-                    nZC < C.Z - ZOffsetEpsilon ||
-                    nZD < D.Z - ZOffsetEpsilon)
+                float nZA = GetNeighborTopHeightLocal(nx, ny, lz, A.P, Neighborhood, HeightGrid);
+                float nZB = GetNeighborTopHeightLocal(nx, ny, lz, B.P, Neighborhood, HeightGrid);
+                float nZC = GetNeighborTopHeightLocal(nx, ny, lz, C.P, Neighborhood, HeightGrid);
+                float nZD = GetNeighborTopHeightLocal(nx, ny, lz, D.P, Neighborhood, HeightGrid);
+
+                if (nZA < A.P.Z - ZOffsetEpsilon ||
+                    nZB < B.P.Z - ZOffsetEpsilon ||
+                    nZC < C.P.Z - ZOffsetEpsilon ||
+                    nZD < D.P.Z - ZOffsetEpsilon)
                 {
-                    AddQuadWorldSmooth(A, B, C, D, SideMatID, UAxis, VAxis, bDiagBD);
+                    AddPatchSmooth(A, B, C, D, SideMatID, UAxis, VAxis, bDiagBD);
                     if (bNeighborAir && lz <= NeighborGround)
                     {
                         EmitRimBands(FaceAxis, FaceSign, Corners, SideMatID, UAxis, VAxis);
@@ -2032,10 +2221,10 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 }
             };
 
-        EmitSide(lx + 1, ly, bAirEast, GroundEast, v100, v101, v111, v110, 1, 2, false, 0, 1, CornersEast);
-        EmitSide(lx - 1, ly, bAirWest, GroundWest, v010, v011, v001, v000, 1, 2, true, 0, -1, CornersWest);
-        EmitSide(lx, ly + 1, bAirNorth, GroundNorth, v110, v111, v011, v010, 0, 2, true, 1, 1, CornersNorth);
-        EmitSide(lx, ly - 1, bAirSouth, GroundSouth, v000, v001, v101, v100, 0, 2, false, 1, -1, CornersSouth);
+        EmitSide(lx + 1, ly, bAirEast, GroundEast, CornersEast, 1, 2, false, 0, 1);
+        EmitSide(lx - 1, ly, bAirWest, GroundWest, CornersWest, 1, 2, true, 0, -1);
+        EmitSide(lx, ly + 1, bAirNorth, GroundNorth, CornersNorth, 0, 2, true, 1, 1);
+        EmitSide(lx, ly - 1, bAirSouth, GroundSouth, CornersSouth, 0, 2, false, 1, -1);
 
         if (!bAirBottom && lz - 1 == GroundHere)
         {
@@ -2059,7 +2248,10 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             const EVoxelType BelowType = Neighborhood.GetVoxel(lx, ly, lz - 1);
             const int32 SkirtMatID = (BelowType == EVoxelType::Stone) ? 2 : 1;
 
-            // Windings mirror the matching EmitSide call on each axis.
+            // Straight quads by construction: this block only runs when lz - 1 == GroundHere,
+            // which makes IsCellExpectedAir(lx,ly,lz) true, so IsCellSmoothSurface is false and
+            // all eight corners report bCurved false. The edges it shares with the side faces
+            // are straight on both sides, so no crack can open here.
             if (bAirEast)  AddQuadWorldSmooth(s10, v100, v110, s11, SkirtMatID, 1, 2, false);
             if (bAirWest)  AddQuadWorldSmooth(s01, v010, v000, s00, SkirtMatID, 1, 2, true);
             if (bAirNorth) AddQuadWorldSmooth(s11, v110, v010, s01, SkirtMatID, 0, 2, true);

@@ -165,6 +165,13 @@ struct FBiomeGrasslandSettings
     float RiverWarpStrength = 250.0f;
 };
 
+struct FSmoothVertex
+{
+    FVector   P = FVector::ZeroVector;
+    FVector3f N = FVector3f::ZeroVector;
+    bool      bCurved = false;   // cave branch, with a usable field gradient
+};
+
 // --- Totally stateless thread-safe generation configuration struct ---
 struct FTerrainGenConfig
 {
@@ -191,6 +198,17 @@ struct FTerrainGenConfig
     int32 GrassBladeSegments;
     bool bTwoSidedGrass;
     float TextureScale;
+
+    bool  bBendCaveFaces = true;
+    int32 CavePatchSubdiv = 2;
+    float CavePatchFlatDot = 0.99f;
+
+    FSmoothVertex GetSmoothVertexEx(int32 VertX, int32 VertY, int32 VertZ,
+        int32 VoxX, int32 VoxY, int32 VoxZ,
+        const FLocalHeightGrid& HeightGrid,
+        const FChunkNeighborhood& Neighborhood,
+        const FIntVector& ChunkCoord,
+        FCaveSmoothCache* CaveCache) const;
 
     float GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) const;
     float GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const;
@@ -223,7 +241,6 @@ struct FCaveSmoothCache
 
     bool IsReady() const { return bReady; }
 
-    bool GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset);
 
     bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);
 
@@ -232,13 +249,18 @@ struct FCaveSmoothCache
     int32 SmoothCell[3] = { MIN_int32, MIN_int32, MIN_int32 };
     bool  bSmoothCellResult = false;
 
+    bool GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal);
 
 private:
     static constexpr int32 SLAB_COUNT = 8;   // power of two; index is z & 7
 
     float GetCellDensity(int32 cx, int32 cy, int32 cz);
     float VertexSurfaceHeight(int32 vx, int32 vy) const;
-    bool  GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset);
+
+    TArray<FVector3f> BaseNormalCache;
+    TArray<FVector3f> VertNormalCache;
+
+    bool GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal);
 
     const FTerrainGenConfig* Config = nullptr;
     const FLocalHeightGrid* Heights = nullptr;
@@ -368,8 +390,21 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain")
     bool bSmoothTerrain = true;
 
+    UPROPERTY(EditAnywhere, Category = "Terrain|Caves")
+    bool bBendCaveFaces = true;
+
+    // Uniform, by necessity: a per-patch count cracks the mesh along shared edges.
+    UPROPERTY(EditAnywhere, Category = "Terrain|Caves", meta = (ClampMin = "1", ClampMax = "4"))
+    int32 CavePatchSubdiv = 2;
+
+    // Edges whose endpoint normals agree within this dot are left straight, so flat
+    // stretches of wall collapse back to a single quad. Pure function of the edge.
+    UPROPERTY(EditAnywhere, Category = "Terrain|Caves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float CavePatchFlatDot = 0.99f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Water")
     bool bEnableWater = true;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Water")
     int32 SeaLevel = 38;
 
