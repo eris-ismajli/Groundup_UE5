@@ -472,7 +472,7 @@ UDynamicMeshComponent* ASmoothVoxelTerrain::AcquireMeshComponent(int32 MeshType)
         Comp->EnableComplexAsSimpleCollision(); Comp->bEnableComplexCollision = bEnableComplexCollision;
         Comp->SetCollisionEnabled(CollisionEnabled); Comp->SetCollisionProfileName(CollisionProfileName);
         Comp->SetGenerateOverlapEvents(bGenerateOverlapEvents);
-        Comp->bUseAsyncCooking = true; Comp->bDeferCollisionUpdates = true;
+        Comp->bUseAsyncCooking = false; Comp->bDeferCollisionUpdates = false;
         if (GrassMaterial) Comp->SetMaterial(0, GrassMaterial);
         if (DirtMaterial) Comp->SetMaterial(1, DirtMaterial);
         if (StoneMaterial) Comp->SetMaterial(2, StoneMaterial);
@@ -841,8 +841,13 @@ void ASmoothVoxelTerrain::GenerateChunkMesh(const FIntVector& ChunkCoord)
             FLocalHeightGrid HeightGrid;
             HeightGrid.Heights = HeightMap->GetData(); HeightGrid.CacheSize = Config.ChunkSize + 5;
 
-            FCaveSmoothCache CaveCache;
-            CaveCache.Init(&Config, &HeightGrid, &Neighborhood, ChunkCoord);
+            static thread_local FCaveSmoothCache CaveCache;
+            static thread_local FIntVector LastInitCoord(-999999, -999999, -999999);
+            if (!CaveCache.IsReady() || LastInitCoord != ChunkCoord)
+            {
+                CaveCache.Init(&Config, &HeightGrid, &Neighborhood, ChunkCoord);
+                LastInitCoord = ChunkCoord;
+            }
 
             FTriIDArray TempTriIDs;
 
@@ -1019,7 +1024,49 @@ void ASmoothVoxelTerrain::RemoveVoxel(FVector WorldLocation)
 
     if (lx < 0 || lx >= ChunkSize || ly < 0 || ly >= ChunkSize || lz < 0 || lz >= MaxHeight) return;
     int32 Index = lx + ly * ChunkSize + lz * ChunkSize * ChunkSize;
-    if ((*Chunk->VoxelData)[Index] == EVoxelType::Air) return;
+
+    // Self-healing fallback: If the hit position landed on Air (e.g., on smooth terrain 
+    // where vertices are displaced above the voxel grid), find the solid voxel supporting it.
+    if ((*Chunk->VoxelData)[Index] == EVoxelType::Air)
+    {
+        bool bFound = false;
+
+        // 1. Search downward (for smooth hills and slopes where the surface sits above GroundLevel)
+        for (int32 dz = -1; dz >= -4 && (lz + dz) >= 0; --dz)
+        {
+            int32 CheckIdx = lx + ly * ChunkSize + (lz + dz) * ChunkSize * ChunkSize;
+            if ((*Chunk->VoxelData)[CheckIdx] != EVoxelType::Air)
+            {
+                lz += dz;
+                Index = CheckIdx;
+                bFound = true;
+                break;
+            }
+        }
+
+        // 2. Search immediate cardinal neighbors (for walls, cliffs, and cave surfaces)
+        if (!bFound)
+        {
+            const int32 Dirs[6][3] = { {0,0,-1}, {0,0,1}, {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0} };
+            for (const auto& d : Dirs)
+            {
+                int32 nx = lx + d[0], ny = ly + d[1], nz = lz + d[2];
+                if (nx >= 0 && nx < ChunkSize && ny >= 0 && ny < ChunkSize && nz >= 0 && nz < MaxHeight)
+                {
+                    int32 CheckIdx = nx + ny * ChunkSize + nz * ChunkSize * ChunkSize;
+                    if ((*Chunk->VoxelData)[CheckIdx] != EVoxelType::Air)
+                    {
+                        lx = nx; ly = ny; lz = nz;
+                        Index = CheckIdx;
+                        bFound = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!bFound) return;
+    }
 
     Chunk->UpdateVoxel(lx, ly, lz, EVoxelType::Air, this);
     if (lx == 0) { if (FVoxelChunk* Neighbor = GetChunk(ChunkCoord + FIntVector(-1, 0, 0))) Neighbor->UpdateSharedFace(ChunkSize - 1, ly, lz, this, FIntVector(1, 0, 0)); }

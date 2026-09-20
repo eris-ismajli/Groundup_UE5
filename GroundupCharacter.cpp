@@ -12,21 +12,16 @@
 #include "Groundup.h"
 #include "DrawDebugHelpers.h"
 
-
 AGroundupCharacter::AGroundupCharacter()
 {
-	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 
-	// Create the first person mesh that will be viewed only by this character's owner
 	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("First Person Mesh"));
-
 	FirstPersonMesh->SetupAttachment(GetMesh());
 	FirstPersonMesh->SetOnlyOwnerSee(true);
 	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
 	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
 
-	// Create the Camera Component	
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
 	FirstPersonCameraComponent->SetupAttachment(FirstPersonMesh, FName("head"));
 	FirstPersonCameraComponent->SetRelativeLocationAndRotation(FVector(-2.8f, 5.89f, 0.0f), FRotator(0.0f, 90.0f, -90.0f));
@@ -36,191 +31,220 @@ AGroundupCharacter::AGroundupCharacter()
 	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
 	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
 
-	// configure the character comps
 	GetMesh()->SetOwnerNoSee(true);
 	GetMesh()->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::WorldSpaceRepresentation;
 
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 96.0f);
 
-	// Configure character movement
 	GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
 	GetCharacterMovement()->AirControl = 0.5f;
 }
 
 void AGroundupCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
-	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-		// Jumping
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AGroundupCharacter::DoJumpStart);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AGroundupCharacter::DoJumpEnd);
 
-		// Moving
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::MoveInput);
 
-		// Looking/Aiming
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::LookInput);
 		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AGroundupCharacter::LookInput);
-
 	}
 	else
 	{
-		UE_LOG(LogGroundup, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
+		UE_LOG(LogGroundup, Error, TEXT("'%s' Failed to find an Enhanced Input Component!"), *GetNameSafe(this));
 	}
 }
 
-
-void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecutePlaceVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
+{
+	if (!HitTerrain) return;
 	FVector PlaceLocation = HitResult.ImpactPoint + HitResult.ImpactNormal * (HitTerrain->CubeSize * 0.5f);
 	HitTerrain->PlaceVoxel(PlaceLocation);
 }
 
 void AGroundupCharacter::ExecuteBreakVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
 {
-	const float CubeSize = HitTerrain->CubeSize;
+    if (!HitTerrain) return;
 
-	// Nudge the impact point inward along the hit normal to avoid boundary ambiguity
-	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * CubeSize * 0.01f;
+    const float CubeSize = HitTerrain->CubeSize;
+    const FVector ImpactPoint = HitResult.ImpactPoint;
+    const FVector ImpactNormal = HitResult.ImpactNormal.GetSafeNormal();
 
-	// Debug visualization for removal
-	if (bShowVoxelDebug && GetWorld())
-	{
-		DrawDebugSphere(GetWorld(), HitResult.ImpactPoint, 12.0f, 12, FColor::Red, false, VoxelDebugLife);
-		DrawDebugLine(GetWorld(), HitResult.ImpactPoint,
-			HitResult.ImpactPoint + HitResult.ImpactNormal * 80.0f,
-			FColor::Yellow, false, VoxelDebugLife, 0, 2.0f);
-		DrawDebugSphere(GetWorld(), AdjustedPoint, 8.0f, 8, FColor::Orange, false, VoxelDebugLife);
-	}
+    // Convert impact point into terrain local coordinates
+    const FVector LocalPos = HitTerrain->GetActorTransform().InverseTransformPosition(ImpactPoint);
 
-	int32 VoxelX, VoxelY, VoxelZ;
-	EVoxelType VoxelType;
+    int32 TargetVoxelX = 0, TargetVoxelY = 0, TargetVoxelZ = 0;
+    EVoxelType TargetVoxelType = EVoxelType::Air;
+    bool bFoundSolid = false;
 
-	if (HitTerrain->GetVoxelAtWorldPoint(HitResult.ImpactPoint, VoxelX, VoxelY, VoxelZ, &VoxelType))
-	{
-		bool bAutoAssisted = false;
-		bool bIsTopFace = (HitResult.ImpactNormal.Z > 0.7f);
+    auto CheckVoxel = [&](int32 X, int32 Y, int32 Z) -> bool
+        {
+            EVoxelType Type = HitTerrain->GetVoxelAtWorld(X, Y, Z);
+            if (Type != EVoxelType::Air)
+            {
+                TargetVoxelX = X;
+                TargetVoxelY = Y;
+                TargetVoxelZ = Z;
+                TargetVoxelType = Type;
+                bFoundSolid = true;
+                return true;
+            }
+            return false;
+        };
 
-		// Auto-assist only when clicking the top face AND hitting air
-		if (bIsTopFace && VoxelType == EVoxelType::Air)
-		{
-			int32 BelowX = VoxelX;
-			int32 BelowY = VoxelY;
-			int32 BelowZ = VoxelZ - 1;
+    const float AbsX = FMath::Abs(ImpactNormal.X);
+    const float AbsY = FMath::Abs(ImpactNormal.Y);
+    const float AbsZ = FMath::Abs(ImpactNormal.Z);
 
-			EVoxelType BelowType = HitTerrain->GetVoxelAtWorld(BelowX, BelowY, BelowZ);
-			if (BelowType != EVoxelType::Air)
-			{
-				VoxelX = BelowX;
-				VoxelY = BelowY;
-				VoxelZ = BelowZ;
-				VoxelType = BelowType;
-				bAutoAssisted = true;
-			}
-			else
-			{
-				if (bShowVoxelDebug && GetWorld())
-				{
-					DrawDebugString(GetWorld(), HitResult.ImpactPoint,
-						TEXT("Air below air - no break"),
-						nullptr, FColor::Magenta, VoxelDebugLife);
-				}
-				return;
-			}
-		}
+    // -------------------------------------------------------------------------
+    // 1. SMALL INWARD NUDGE (Normal-aligned only, NO RayDir drift)
+    // A 15% step stays firmly inside this voxel on both triangles.
+    // -------------------------------------------------------------------------
+    const FVector InwardNudge = -ImpactNormal * (CubeSize * 0.15f);
+    const FVector NudgeLocal = HitTerrain->GetActorTransform().InverseTransformPosition(ImpactPoint + InwardNudge);
 
-		// Only break if we now have a solid voxel
-		if (VoxelType != EVoxelType::Air)
-		{
-			FVector LocalCenter(
-				VoxelX * CubeSize + CubeSize * 0.5f,
-				VoxelY * CubeSize + CubeSize * 0.5f,
-				VoxelZ * CubeSize + CubeSize * 0.5f
-			);
-			FVector WorldCenter = HitTerrain->GetActorTransform().TransformPosition(LocalCenter);
+    const int32 NudgeX = FMath::FloorToInt(NudgeLocal.X / CubeSize);
+    const int32 NudgeY = FMath::FloorToInt(NudgeLocal.Y / CubeSize);
+    const int32 NudgeZ = FMath::FloorToInt(NudgeLocal.Z / CubeSize);
 
-			// Debug visualization of the voxel being removed
-			if (bShowVoxelDebug && GetWorld())
-			{
-				FVector WorldMin = HitTerrain->GetActorTransform().TransformPosition(FVector(
-					VoxelX * CubeSize,
-					VoxelY * CubeSize,
-					VoxelZ * CubeSize));
+    if (CheckVoxel(NudgeX, NudgeY, NudgeZ))
+    {
+        // Resolved immediately via normal penetration
+    }
+    // -------------------------------------------------------------------------
+    // 2. AXIS-LOCKED PROJECTION (Prevents horizontal/diagonal drift)
+    // -------------------------------------------------------------------------
+    else if (AbsZ >= AbsX && AbsZ >= AbsY)
+    {
+        // Ground, slopes, hills, or ceilings:
+        // Lock X and Y to the hit column so Triangle 2 cannot drift into the block behind it.
+        const int32 ColX = FMath::FloorToInt(LocalPos.X / CubeSize);
+        const int32 ColY = FMath::FloorToInt(LocalPos.Y / CubeSize);
+        const int32 StartZ = FMath::FloorToInt(LocalPos.Z / CubeSize);
 
-				FVector WorldMax = HitTerrain->GetActorTransform().TransformPosition(FVector(
-					(VoxelX + 1) * CubeSize,
-					(VoxelY + 1) * CubeSize,
-					(VoxelZ + 1) * CubeSize));
+        if (ImpactNormal.Z > 0.0f)
+        {
+            // Upward face / slope: search down the column for the ground voxel
+            for (int32 dz = 0; dz >= -6; --dz)
+            {
+                if (CheckVoxel(ColX, ColY, StartZ + dz)) break;
+            }
+        }
+        else
+        {
+            // Ceiling / overhang: search up the column into the ceiling rock
+            for (int32 dz = 0; dz <= 6; ++dz)
+            {
+                if (CheckVoxel(ColX, ColY, StartZ + dz)) break;
+            }
+        }
+    }
+    else if (AbsX >= AbsY)
+    {
+        // East/West wall: lock Y and Z, search along X into the wall
+        const int32 RowY = FMath::FloorToInt(LocalPos.Y / CubeSize);
+        const int32 RowZ = FMath::FloorToInt(LocalPos.Z / CubeSize);
+        const int32 StartX = FMath::FloorToInt(LocalPos.X / CubeSize);
+        const int32 StepX = (ImpactNormal.X > 0.0f) ? -1 : 1;
 
-				FVector BoxCenter = (WorldMin + WorldMax) * 0.5f;
-				FVector BoxExtent = (WorldMax - WorldMin) * 0.5f;
+        for (int32 dx = 0; dx != StepX * 4; dx += StepX)
+        {
+            if (CheckVoxel(StartX + dx, RowY, RowZ)) break;
+        }
+    }
+    else
+    {
+        // North/South wall: lock X and Z, search along Y into the wall
+        const int32 RowX = FMath::FloorToInt(LocalPos.X / CubeSize);
+        const int32 RowZ = FMath::FloorToInt(LocalPos.Z / CubeSize);
+        const int32 StartY = FMath::FloorToInt(LocalPos.Y / CubeSize);
+        const int32 StepY = (ImpactNormal.Y > 0.0f) ? -1 : 1;
 
-				FColor BoxColor = bAutoAssisted ? FColor::Green : FColor::Cyan;
+        for (int32 dy = 0; dy != StepY * 4; dy += StepY)
+        {
+            if (CheckVoxel(RowX, StartY + dy, RowZ)) break;
+        }
+    }
 
-				DrawDebugBox(GetWorld(), BoxCenter, BoxExtent, BoxColor, false, VoxelDebugLife);
-				DrawDebugSphere(GetWorld(), WorldCenter, 10.0f, 8, BoxColor, false, VoxelDebugLife);
+    // -------------------------------------------------------------------------
+    // 3. REMOVE RESOLVED VOXEL AT EXACT CENTER
+    // -------------------------------------------------------------------------
+    if (bFoundSolid && TargetVoxelType != EVoxelType::Air)
+    {
+        const FVector LocalCenter(
+            (TargetVoxelX + 0.5f) * CubeSize,
+            (TargetVoxelY + 0.5f) * CubeSize,
+            (TargetVoxelZ + 0.5f) * CubeSize
+        );
+        const FVector WorldCenter = HitTerrain->GetActorTransform().TransformPosition(LocalCenter);
 
-				DrawDebugString(GetWorld(), HitResult.ImpactPoint + FVector(0, 0, 30),
-					FString::Printf(TEXT("Break Voxel (%d, %d, %d) Type: %d%s"),
-						VoxelX, VoxelY, VoxelZ,
-						(int32)VoxelType,
-						bAutoAssisted ? TEXT(" (auto-assisted below)") : TEXT("")),
-					nullptr, FColor::White, VoxelDebugLife);
-			}
+        if (bShowVoxelDebug && GetWorld())
+        {
+            DrawDebugSphere(GetWorld(), WorldCenter, 12.0f, 8, FColor::Green, false, VoxelDebugLife);
+            DrawDebugString(GetWorld(), ImpactPoint + FVector(0, 0, 30),
+                FString::Printf(TEXT("Break Voxel (%d, %d, %d) Type: %d"),
+                    TargetVoxelX, TargetVoxelY, TargetVoxelZ, (int32)TargetVoxelType),
+                nullptr, FColor::White, VoxelDebugLife);
+        }
 
-			HitTerrain->RemoveVoxel(WorldCenter);
-		}
-	}
+        HitTerrain->RemoveVoxel(WorldCenter);
+    }
 }
 
-void AGroundupCharacter::ExecuteHighlightVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult) {
+void AGroundupCharacter::ExecuteHighlightVoxel(ASmoothVoxelTerrain* HitTerrain, FHitResult& HitResult)
+{
+	if (!HitTerrain) return;
 	FVector AdjustedPoint = HitResult.ImpactPoint - HitResult.ImpactNormal * HitTerrain->CubeSize * 0.1f;
-	// call highlight voxel method
 }
 
-void AGroundupCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Action) {
-	if (!FirstPersonCameraComponent) return;
+void AGroundupCharacter::HandleVoxelInteraction(const EVoxelInteractionAction Action)
+{
+    if (!FirstPersonCameraComponent) return;
 
-	FVector Start = FirstPersonCameraComponent->GetComponentLocation();
-	FVector End = Start + (FirstPersonCameraComponent->GetForwardVector() * 1000.0f);
+    FVector Start = FirstPersonCameraComponent->GetComponentLocation();
+    FVector End = Start + (FirstPersonCameraComponent->GetForwardVector() * 1000.0f);
 
-	FHitResult HitResult;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(this);
+    FHitResult HitResult;
+    FCollisionQueryParams QueryParams;
+    QueryParams.AddIgnoredActor(this);
+    QueryParams.bTraceComplex = true;
+    QueryParams.bReturnFaceIndex = true;
 
-	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams))
-	{
-		ASmoothVoxelTerrain* HitTerrain = Cast<ASmoothVoxelTerrain>(HitResult.GetActor());
-		if (HitTerrain)
-		{
-			switch (Action) {
-			case EVoxelInteractionAction::Place:
-				ExecutePlaceVoxel(HitTerrain, HitResult);
-				break;
-			case EVoxelInteractionAction::Break:
-				ExecuteBreakVoxel(HitTerrain, HitResult);
-				break;
-			case EVoxelInteractionAction::Hover:
-				ExecuteHighlightVoxel(HitTerrain, HitResult);
-				break;
-			default:
-				UE_LOG(LogTemp, Error, TEXT("Undefined voxel interaction action."));
-			}
-		}
-	}
+    if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_Visibility, QueryParams))
+    {
+        ASmoothVoxelTerrain* HitTerrain = Cast<ASmoothVoxelTerrain>(HitResult.GetActor());
+        if (HitTerrain)
+        {
+            switch (Action)
+            {
+            case EVoxelInteractionAction::Place:
+                ExecutePlaceVoxel(HitTerrain, HitResult);
+                break;
+            case EVoxelInteractionAction::Break:
+                ExecuteBreakVoxel(HitTerrain, HitResult);
+                break;
+            case EVoxelInteractionAction::Hover:
+                ExecuteHighlightVoxel(HitTerrain, HitResult);
+                break;
+            default:
+                UE_LOG(LogTemp, Error, TEXT("Undefined voxel interaction action."));
+            }
+        }
+    }
 }
 
 void AGroundupCharacter::MoveInput(const FInputActionValue& Value)
 {
 	FVector2D MovementVector = Value.Get<FVector2D>();
-
 	DoMove(MovementVector.X, MovementVector.Y);
 }
 
 void AGroundupCharacter::LookInput(const FInputActionValue& Value)
 {
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
-
 	DoAim(LookAxisVector.X, LookAxisVector.Y);
 }
 
@@ -242,27 +266,8 @@ void AGroundupCharacter::DoMove(float Right, float Forward)
 	}
 }
 
-void AGroundupCharacter::DoJumpStart()
-{
-	Jump();
-}
-
-void AGroundupCharacter::DoJumpEnd()
-{
-	StopJumping();
-}
-
-void AGroundupCharacter::RemoveVoxel()
-{
-	HandleVoxelInteraction(EVoxelInteractionAction::Break);
-}
-
-void AGroundupCharacter::PlaceVoxel()
-{
-	HandleVoxelInteraction(EVoxelInteractionAction::Place);
-}
-
-void AGroundupCharacter::HoverVoxel()
-{
-	HandleVoxelInteraction(EVoxelInteractionAction::Hover);
-}
+void AGroundupCharacter::DoJumpStart() { Jump(); }
+void AGroundupCharacter::DoJumpEnd() { StopJumping(); }
+void AGroundupCharacter::RemoveVoxel() { HandleVoxelInteraction(EVoxelInteractionAction::Break); }
+void AGroundupCharacter::PlaceVoxel() { HandleVoxelInteraction(EVoxelInteractionAction::Place); }
+void AGroundupCharacter::HoverVoxel() { HandleVoxelInteraction(EVoxelInteractionAction::Hover); }
