@@ -196,6 +196,37 @@ float CalculateFBM3D(float x, float y, float z, int32 octaves, float freq, float
     return maxAmp > 0.0f ? total / maxAmp : 0.0f;
 }
 
+// Ridged multifractal read as a carve depth rather than a height. Returns [0,1]:
+// 0 along the crest network (which is a connected set of curves, so it stays exactly on
+// the original smooth surface) and 1 at the bottom of a pit. Because the result is only
+// ever subtracted along the surface normal, the rock gains cracks and facets without
+// gaining a single protrusion.
+static float CalculateRockCarve3D(float x, float y, float z,
+    int32 Octaves, float Freq, float Lacunarity, float Gain,
+    float RidgeWeight, float Sharpness, const float(&Off)[6][3])
+{
+    float total = 0.0f, maxAmp = 0.0f, amp = 1.0f, w = 1.0f;
+    const int32 Count = FMath::Clamp(Octaves, 1, 6);
+
+    for (int32 i = 0; i < Count; ++i)
+    {
+        float n = FastPerlinNoise3D(x * Freq + Off[i][0], y * Freq + Off[i][1], z * Freq + Off[i][2]);
+        n = 1.0f - FMath::Abs(n);   // crest where the noise crosses zero
+        n *= n;                     // squaring is what makes the crest a sharp edge
+        n *= w;                     // feedback: detail only survives near a crest
+        w = FMath::Clamp(n * RidgeWeight, 0.0f, 1.0f);
+
+        total += n * amp;
+        maxAmp += amp;
+        Freq *= Lacunarity;
+        amp *= Gain;
+    }
+
+    const float Ridge = (maxAmp > 0.0f) ? FMath::Clamp(total / maxAmp, 0.0f, 1.0f) : 0.0f;
+    const float Carve = 1.0f - Ridge;
+    return FMath::IsNearlyEqual(Sharpness, 1.0f) ? Carve : FMath::Pow(Carve, Sharpness);
+}
+
 FORCEINLINE FLinearColor FastColorLerp(const FLinearColor& A, const FLinearColor& B, float Alpha)
 {
     return FLinearColor(A.R + (B.R - A.R) * Alpha, A.G + (B.G - A.G) * Alpha, A.B + (B.B - A.B) * Alpha, A.A + (B.A - A.A) * Alpha);
@@ -709,6 +740,7 @@ FTerrainGenConfig ASmoothVoxelTerrain::GetTerrainConfig() const
     Config.bTwoSidedGrass = bTwoSidedGrass; Config.TextureScale = TextureScale;
     Config.bBendCaveFaces = bBendCaveFaces; Config.CavePatchSubdiv = CavePatchSubdiv;
     Config.CavePatchFlatDot = CavePatchFlatDot;
+    Config.CaveRoughness = CaveRoughness;
     Config.PrepareDerived();
     return Config;
 }
@@ -1469,6 +1501,16 @@ FSmoothVertex FTerrainGenConfig::GetSmoothVertexEx(
                 BaseZ + (double)Off.Z) * CubeSize;
             Out.N = Nrm;
             Out.bCurved = !Nrm.IsNearlyZero();
+
+            // Macro roughness only. It is a pure function of the final world position and
+            // the field normal, both of which two neighbouring chunks agree on exactly,
+            // so a shared lattice vertex lands in the same place from either side.
+            // The micro layer is deliberately NOT applied here: leaving the lattice cage
+            // alone at sub-voxel scale is what keeps the collision hull walkable.
+            if (Out.bCurved)
+            {
+                Out.P = ApplyCaveRoughness(Out.P, Nrm, 1.0f, 0.0f);
+            }
             return Out;
         }
     }
@@ -1549,8 +1591,26 @@ void FTerrainGenConfig::PrepareDerived()
         CaveOff.Chamber[i][1] = Hash3D(Seed + 141, i, 22) * 3000.0f;
         CaveOff.Chamber[i][2] = Hash3D(Seed + 142, i, 33) * 3000.0f;
     }
-}
 
+    // Wall roughness. Separate offsets per layer so macro lumps and micro chipping do
+    // not line up with each other or with the tunnel field.
+    RoughOff.Warp[0] = Hash3D(Seed, 201, 1) * 4000.0f;
+    RoughOff.Warp[1] = Hash3D(Seed, 202, 2) * 4000.0f;
+    RoughOff.Warp[2] = Hash3D(Seed, 203, 3) * 4000.0f;
+
+    for (int32 i = 0; i < 6; ++i)
+    {
+        RoughOff.Macro[i][0] = Hash3D(Seed + 210, i, 11) * 4000.0f;
+        RoughOff.Macro[i][1] = Hash3D(Seed + 211, i, 22) * 4000.0f;
+        RoughOff.Macro[i][2] = Hash3D(Seed + 212, i, 33) * 4000.0f;
+
+        RoughOff.Micro[i][0] = Hash3D(Seed + 220, i, 11) * 4000.0f;
+        RoughOff.Micro[i][1] = Hash3D(Seed + 221, i, 22) * 4000.0f;
+        RoughOff.Micro[i][2] = Hash3D(Seed + 222, i, 33) * 4000.0f;
+    }
+
+    RoughOff.Strata = Hash2D(Seed, 230) * 4000.0f;
+}
 float FTerrainGenConfig::GetCaveDensityAt(float WorldX, float WorldY, float WorldZ, float SurfaceHeight) const
 {
     if (!CaveSettings.bEnableCaves) return -1.0f;
@@ -1647,6 +1707,91 @@ float FTerrainGenConfig::GetCaveDensity(int32 WorldX, int32 WorldY, int32 WorldZ
 bool FTerrainGenConfig::IsInsideCave(int32 WorldX, int32 WorldY, int32 WorldZ, float SurfaceHeight) const
 {
     return GetCaveDensity(WorldX, WorldY, WorldZ, SurfaceHeight) > 0.0f;
+}
+
+float FTerrainGenConfig::GetCaveRoughDepth(float VoxX, float VoxY, float VoxZ,
+    const FVector3f& Normal, float MacroWeight, float MicroWeight) const
+{
+    const FCaveRoughnessSettings& R = CaveRoughness;
+    if (!R.bEnableCaveRoughness) return 0.0f;
+
+    const bool bWantMacro = (MacroWeight > 0.0f) && (R.MacroDepth > 0.0f);
+    const bool bWantMicro = (MicroWeight > 0.0f) && (R.MicroDepth > 0.0f);
+    if (!bWantMacro && !bWantMicro) return 0.0f;
+
+    // Up-facing surfaces are the ones the player walks on, so they get their own
+    // multiplier. Keeping FloorRoughness low leaves cave floors readable underfoot
+    // while the walls and the roof can be as broken as you like.
+    const float nz = FMath::Clamp(Normal.Z, -1.0f, 1.0f);
+    const float Vert = nz * nz;
+    const float Orient = (nz >= 0.0f)
+        ? FMath::Lerp(R.WallRoughness, R.FloorRoughness, Vert)
+        : FMath::Lerp(R.WallRoughness, R.CeilingRoughness, Vert);
+    if (Orient <= 0.0f) return 0.0f;
+
+    float px = VoxX, py = VoxY, pz = VoxZ;
+
+    // Warping the sample point, not the result, is what stops the fractures from
+    // running parallel to the noise lattice and reading as a grid.
+    if (R.WarpStrength > 0.0f)
+    {
+        const float ws = R.WarpScale;
+        const float wx = FastPerlinNoise3D(px * ws + RoughOff.Warp[0], py * ws + RoughOff.Warp[1], pz * ws + RoughOff.Warp[2]);
+        const float wy = FastPerlinNoise3D(py * ws + RoughOff.Warp[1], pz * ws + RoughOff.Warp[2], px * ws + RoughOff.Warp[0]);
+        const float wz = FastPerlinNoise3D(pz * ws + RoughOff.Warp[2], px * ws + RoughOff.Warp[0], py * ws + RoughOff.Warp[1]);
+        px += wx * R.WarpStrength;
+        py += wy * R.WarpStrength;
+        pz += wz * R.WarpStrength;
+    }
+
+    // Bedding planes: bands of harder and softer rock stacked along Z, optionally tilted.
+    float Strata = 1.0f;
+    if (R.StrataStrength > 0.0f && R.StrataScale > 0.0f)
+    {
+        const float Band = (pz + R.StrataTilt * (px * 0.6f + py * 0.8f)) * R.StrataScale;
+        const float Bed = FastPerlinNoise2D(Band, RoughOff.Strata) * 0.5f + 0.5f;
+        Strata = FMath::Lerp(1.0f, Bed, FMath::Clamp(R.StrataStrength, 0.0f, 1.0f));
+    }
+
+    float Depth = 0.0f;
+
+    if (bWantMacro)
+    {
+        Depth += R.MacroDepth * MacroWeight * CalculateRockCarve3D(px, py, pz,
+            R.MacroOctaves, R.MacroScale, R.Lacunarity, R.Gain, R.RidgeWeight,
+            R.MacroSharpness, RoughOff.Macro);
+    }
+
+    if (bWantMicro)
+    {
+        Depth += R.MicroDepth * MicroWeight * CalculateRockCarve3D(px, py, pz,
+            R.MicroOctaves, R.MicroScale, R.Lacunarity, R.Gain, R.RidgeWeight,
+            R.MicroSharpness, RoughOff.Micro);
+    }
+
+    Depth *= Orient * Strata;
+    return FMath::Clamp(Depth, 0.0f, R.MaxDepth);
+}
+
+FVector FTerrainGenConfig::ApplyCaveRoughness(const FVector& WorldPos, const FVector3f& Normal,
+    float MacroWeight, float MicroWeight) const
+{
+    if (!CaveRoughness.bEnableCaveRoughness) return WorldPos;
+    if (Normal.IsNearlyZero()) return WorldPos;
+
+    const float Depth = GetCaveRoughDepth(
+        (float)WorldPos.X * InvCubeSize,
+        (float)WorldPos.Y * InvCubeSize,
+        (float)WorldPos.Z * InvCubeSize,
+        Normal, MacroWeight, MicroWeight);
+
+    if (Depth <= 0.0f) return WorldPos;
+
+    // The density gradient points out of the solid, so subtracting always cuts into the
+    // rock. That one sign is the whole collision guarantee: the carved surface can never
+    // cross in front of the smooth one, so nothing new ever sticks out into the tunnel.
+    const double Scale = (double)Depth * (double)CubeSize;
+    return WorldPos - FVector((double)Normal.X, (double)Normal.Y, (double)Normal.Z) * Scale;
 }
 
 
@@ -2100,8 +2245,8 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         };
 
     // A curved replacement for AddQuadWorldSmooth. The quad's corners map to
-    // A=(u0,v0) B=(u1,v0) C=(u1,v1) D=(u0,v1), so the sub-cell winding below matches
-    // the caller's loop order exactly and the shorter-diagonal rule still applies.
+ // A=(u0,v0) B=(u1,v0) C=(u1,v1) D=(u0,v1), so the sub-cell winding below matches
+ // the caller's loop order exactly and the shorter-diagonal rule still applies.
     auto AddPatchSmooth = [&](const FSmoothVertex& A, const FSmoothVertex& B,
         const FSmoothVertex& C, const FSmoothVertex& Dv,
         int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
@@ -2116,13 +2261,37 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                     return FVector3f::DotProduct(P0.N, P1.N) < CavePatchFlatDot;
                 };
 
+            // Same rule for roughness: an edge is rough when both endpoints are cave-surface
+            // vertices. The patch on the other side reads the same two endpoints, so it
+            // reaches the same answer and cuts the shared edge the same way.
+            const bool bRoughOn = CaveRoughness.bEnableCaveRoughness
+                && CaveRoughness.MicroDepth > 0.0f
+                && CaveRoughness.DetailSubdivisions > 1;
+
+            auto EdgeRough = [&](const FSmoothVertex& P0, const FSmoothVertex& P1)
+                {
+                    return bRoughOn && P0.bCurved && P1.bCurved;
+                };
+
             const bool bEdgeAB = EdgeBends(A, B);    // v = 0
             const bool bEdgeBC = EdgeBends(B, C);    // u = 1
             const bool bEdgeDC = EdgeBends(Dv, C);   // v = 1
             const bool bEdgeAD = EdgeBends(A, Dv);   // u = 0
 
-            const int32 N = (bEdgeAB || bEdgeBC || bEdgeDC || bEdgeAD)
-                ? FMath::Clamp(CavePatchSubdiv, 1, 4)
+            const bool bRoughAB = EdgeRough(A, B);
+            const bool bRoughBC = EdgeRough(B, C);
+            const bool bRoughDC = EdgeRough(Dv, C);
+            const bool bRoughAD = EdgeRough(A, Dv);
+
+            const bool bAnyBend = bEdgeAB || bEdgeBC || bEdgeDC || bEdgeAD;
+            const bool bAnyRough = bRoughAB || bRoughBC || bRoughDC || bRoughAD;
+
+            // One subdivision count shared by every patch that subdivides at all. Two patches
+            // meeting on a bent or rough edge have to cut it identically or the seam opens,
+            // and a straight edge stays collinear at any N, so a single constant is both
+            // sufficient and the only safe choice.
+            const int32 N = (bAnyBend || bAnyRough)
+                ? FMath::Clamp(FMath::Max(CavePatchSubdiv, bRoughOn ? CaveRoughness.DetailSubdivisions : 1), 1, 6)
                 : 1;
 
             if (N == 1)
@@ -2154,19 +2323,64 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                     return (1.0 - v) * Cu0 + v * Cu1 + (1.0 - u) * Cv0 + u * Cv1 - Bl;
                 };
 
+            // Micro roughness weight. Zero at all four lattice corners, which is what leaves
+            // the one-voxel cage of the mesh exactly where it was and gives a character
+            // capsule an unbroken surface to ride. On a boundary this collapses to a function
+            // of that edge's parameter alone, and the hat is symmetric, so it does not matter
+            // which direction the neighbouring patch walks the shared edge.
+            auto RoughHat = [](double t) { const double h = 4.0 * t * (1.0 - t); return h * h; };
+
+            auto MicroWeight = [&](double u, double v) -> float
+                {
+                    if (!bAnyRough) return 0.0f;
+                    const double wAB = bRoughAB ? RoughHat(u) : 0.0;
+                    const double wDC = bRoughDC ? RoughHat(u) : 0.0;
+                    const double wAD = bRoughAD ? RoughHat(v) : 0.0;
+                    const double wBC = bRoughBC ? RoughHat(v) : 0.0;
+                    const double W = (1.0 - v) * wAB + v * wDC + (1.0 - u) * wAD + u * wBC;
+                    return (float)FMath::Min(1.0, W);
+                };
+
+            // A corner that is not a cave vertex contributes nothing to the carve direction,
+            // so on the boundary of the rough region the direction is driven by the cave side
+            // alone and the weight has already faded to zero anyway.
+            const FVector3f NA = A.bCurved ? A.N : FVector3f::ZeroVector;
+            const FVector3f NB = B.bCurved ? B.N : FVector3f::ZeroVector;
+            const FVector3f NC = C.bCurved ? C.N : FVector3f::ZeroVector;
+            const FVector3f ND = Dv.bCurved ? Dv.N : FVector3f::ZeroVector;
+
+            auto PatchNormal = [&](double u, double v) -> FVector3f
+                {
+                    const FVector3f Nn =
+                        NA * (float)((1.0 - u) * (1.0 - v)) + NB * (float)(u * (1.0 - v)) +
+                        NC * (float)(u * v) + ND * (float)((1.0 - u) * v);
+                    return Nn.GetSafeNormal();
+                };
+
             const int32 Stride = N + 1;
-            TArray<FVector, TInlineAllocator<25>> VPos; VPos.SetNumUninitialized(Stride * Stride);
-            TArray<int32, TInlineAllocator<25>>   VIdx; VIdx.SetNumUninitialized(Stride * Stride);
+            TArray<FVector, TInlineAllocator<49>> VPos; VPos.SetNumUninitialized(Stride * Stride);
+            TArray<int32, TInlineAllocator<49>>   VIdx; VIdx.SetNumUninitialized(Stride * Stride);
             // UVs are a function of position, so they are shared per grid vertex exactly as
             // the positions are. At N=2 that is 9 elements instead of 24.
-            TArray<int32, TInlineAllocator<25>>   UIdx; UIdx.SetNumUninitialized(Stride * Stride);
+            TArray<int32, TInlineAllocator<49>>   UIdx; UIdx.SetNumUninitialized(Stride * Stride);
 
             const double InvN = 1.0 / (double)N;
             for (int32 j = 0; j <= N; ++j)
             {
                 for (int32 i = 0; i <= N; ++i)
                 {
-                    const FVector P = PatchPoint((double)i * InvN, (double)j * InvN);
+                    const double u = (double)i * InvN;
+                    const double v = (double)j * InvN;
+
+                    FVector P = PatchPoint(u, v);
+
+                    const float W = MicroWeight(u, v);
+                    if (W > 0.0f)
+                    {
+                        const FVector3f Nn = PatchNormal(u, v);
+                        if (!Nn.IsNearlyZero()) P = ApplyCaveRoughness(P, Nn, 0.0f, W);
+                    }
+
                     const int32 k = i + j * Stride;
                     VPos[k] = P;
                     VIdx[k] = Mesh.AppendVertex(FVector3d(P));

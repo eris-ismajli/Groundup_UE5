@@ -69,6 +69,120 @@ enum class EChunkState : uint8
     MeshReady
 };
 
+// ---------------------------------------------------------------------------------
+// CAVE WALL ROUGHNESS
+// ---------------------------------------------------------------------------------
+// Roughness is always carved INWARD from the smooth cave surface, and the micro layer
+// is forced to zero at every voxel-lattice vertex. The collision hull is therefore the
+// original smooth surface with pits cut into it - there is nothing sticking out for a
+// character capsule to snag on.
+USTRUCT(BlueprintType)
+struct FCaveRoughnessSettings
+{
+    GENERATED_BODY()
+
+    /** Master switch for cave wall roughness. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness")
+    bool bEnableCaveRoughness = true;
+
+    /**
+     * Tessellation of a cave face while roughness is on. 1 = micro layer off,
+     * 2 = 4x triangles on cave faces, 3 = 9x, 4 = 16x. This is your whole fine-detail
+     * budget and it costs both render triangles and collision cook time.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness", meta = (ClampMin = "1", ClampMax = "6"))
+    int32 DetailSubdivisions = 2;
+
+    // ---- MACRO layer: moves the lattice vertices. Collision follows it. ----
+
+    /** Carve depth of the large lumps, in voxels. 0 = collision identical to before. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Macro", meta = (ClampMin = "0.0", ClampMax = "1.5"))
+    float MacroDepth = 0.30f;
+
+    /** Cycles per voxel. Lower = broader boulder-like shapes. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Macro", meta = (ClampMin = "0.01", ClampMax = "2.0"))
+    float MacroScale = 0.32f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Macro", meta = (ClampMin = "1", ClampMax = "6"))
+    int32 MacroOctaves = 2;
+
+    /** >1 widens the flat crests and localises the pits. <1 gives thin knife ridges. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Macro", meta = (ClampMin = "0.25", ClampMax = "4.0"))
+    float MacroSharpness = 1.0f;
+
+    // ---- MICRO layer: sub-voxel chipping. Never moves a lattice vertex. ----
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Micro", meta = (ClampMin = "0.0", ClampMax = "1.5"))
+    float MicroDepth = 0.30f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Micro", meta = (ClampMin = "0.1", ClampMax = "8.0"))
+    float MicroScale = 1.60f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Micro", meta = (ClampMin = "1", ClampMax = "6"))
+    int32 MicroOctaves = 3;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Micro", meta = (ClampMin = "0.25", ClampMax = "4.0"))
+    float MicroSharpness = 1.30f;
+
+    // ---- Shared fractal shape ----
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Shape", meta = (ClampMin = "1.5", ClampMax = "4.0"))
+    float Lacunarity = 2.13f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Shape", meta = (ClampMin = "0.1", ClampMax = "0.9"))
+    float Gain = 0.5f;
+
+    /** Ridged-multifractal feedback. Higher = crests carry more fine detail, more shattered. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Shape", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+    float RidgeWeight = 2.0f;
+
+    /** Domain warp, in voxels. Breaks the noise grid so fractures wander instead of lining up. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Shape", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+    float WarpStrength = 0.55f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Shape", meta = (ClampMin = "0.01", ClampMax = "2.0"))
+    float WarpScale = 0.22f;
+
+    // ---- Bedding planes / strata ----
+
+    /** 0 = uniform rock, 1 = strong horizontal banding of rough and smooth layers. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Strata", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float StrataStrength = 0.40f;
+
+    /** Cycles per voxel along Z. Lower = thicker beds. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Strata", meta = (ClampMin = "0.01", ClampMax = "2.0"))
+    float StrataScale = 0.25f;
+
+    /** Tilts the beds off horizontal. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Strata", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float StrataTilt = 0.12f;
+
+    // ---- Orientation shaping ----
+
+    /** Multiplier on up-facing surfaces. This is what the player walks on - keep it low. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Orientation", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+    float FloorRoughness = 0.30f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Orientation", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+    float WallRoughness = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness|Orientation", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+    float CeilingRoughness = 1.0f;
+
+    /** Hard clamp on total carve depth, in voxels. Raise past ~0.7 and thin walls can self-intersect. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cave Roughness", meta = (ClampMin = "0.0", ClampMax = "1.5"))
+    float MaxDepth = 0.60f;
+};
+
+// Seed-derived noise offsets, filled once in PrepareDerived.
+struct FCaveRoughOffsets
+{
+    float Warp[3] = { 0.0f, 0.0f, 0.0f };
+    float Macro[6][3] = {};
+    float Micro[6][3] = {};
+    float Strata = 0.0f;
+};
+
 USTRUCT(BlueprintType)
 struct FCaveSettings
 {
@@ -238,6 +352,16 @@ struct FTerrainGenConfig
     };
     FCaveOffsets CaveOff;
     float InvCubeSize = 0.01f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves")
+    FCaveRoughnessSettings CaveRoughness;
+
+    FCaveRoughOffsets RoughOff;
+
+    float   GetCaveRoughDepth(float VoxX, float VoxY, float VoxZ, const FVector3f& Normal,
+        float MacroWeight, float MicroWeight) const;
+    FVector ApplyCaveRoughness(const FVector& WorldPos, const FVector3f& Normal,
+        float MacroWeight, float MicroWeight) const;
 
     // Must be called once after all plain fields are filled in.
     void PrepareDerived();
@@ -450,6 +574,9 @@ public:
     // stretches of wall collapse back to a single quad. Pure function of the edge.
     UPROPERTY(EditAnywhere, Category = "Terrain|Caves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float CavePatchFlatDot = 0.99f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Caves")
+    FCaveRoughnessSettings CaveRoughness;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain|Water")
     bool bEnableWater = true;
