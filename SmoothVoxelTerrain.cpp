@@ -1529,7 +1529,12 @@ FSmoothVertex FTerrainGenConfig::GetSmoothVertexEx(
     }
 
     // --- Cave-wall displacement (generated state only) ---
-    if (CaveCache && CaveCache->IsReady() && CaveCache->IsCellSmoothSurface(VoxX, VoxY, VoxZ))
+    // Keyed on the lattice vertex, not on whether generation happened to expose this cell.
+    // Any cell generation made solid takes the shared cave vertex, so digging into a curved
+    // wall exposes rock that already conforms to it: corners on the generated surface stay
+    // exactly where the wall had them, corners inside the rock have no cave vertex and stay
+    // on the lattice. Cells in generated air are player-placed blocks and stay cubic.
+    if (CaveCache && CaveCache->IsReady() && !CaveCache->IsCellExpectedAir(VoxX, VoxY, VoxZ))
     {
         FSmoothVertex Cave;
         if (GetCaveVertex(VertX, VertY, VertZ, ChunkCoord, CaveCache, Cave)) return Cave;
@@ -3040,6 +3045,11 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
             QC[FaceAxis] += FaceSign;
             const FIntVector IntoCell(QC[0], QC[1], QC[2]);
 
+            // The same override FaceCorners applied to this face, so the band starts on the edge
+            // the face actually drew. Edit-exposed rock carries cave vertices and can be moved by a
+            // split cell like any other face; starting from the raw corner would leave a sliver.
+            auto FaceWants = [&](const FSplitEdge& E) { return WantsOverride(E, SelfCell, IntoCell); };
+
             for (int32 i = 0; i < 4; ++i)
             {
                 const int32 c0 = Corners[i];
@@ -3064,25 +3074,23 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                 const int32* Adj[2] = { nullptr, nullptr };
                 if (!bPTAir) Adj[0] = bQTAir ? PT : QT;
                 if (!bQTAir) Adj[1] = QT; else if (!bPTAir) Adj[1] = PT;
+                if (!Adj[0] && !Adj[1]) continue;
+
+                FSmoothVertex R0 = Corner(c0);
+                FSmoothVertex R1 = Corner(c1);
+                OverrideCorner(R0, FaceWants);
+                OverrideCorner(R1, FaceWants);
 
                 for (int32 k = 0; k < 2; ++k)
                 {
                     if (!Adj[k]) continue;
                     if (k == 1 && Adj[0] == Adj[1]) continue;
-                    if (!CaveCache->IsCellSmoothSurface(Adj[k][0], Adj[k][1], Adj[k][2])) continue;
 
-                    const int32 EdgeKey = FMath::Min(c0, c1) * 8 + FMath::Max(c0, c1);
-                    const int32 AdjKey = (Adj[k][0] - lx + 1) + (Adj[k][1] - ly + 1) * 3 + (Adj[k][2] - lz + 1) * 9;
-                    const uint16 BandKey = (uint16)(EdgeKey * 27 + AdjKey);
+                    // Any cell generation made solid draws this edge from the shared cave vertices,
+                    // whether generation or an edit exposed it. Cells in generated air are placed
+                    // blocks: lattice on both sides, nothing to bridge.
+                    if (CaveCache->IsCellExpectedAir(Adj[k][0], Adj[k][1], Adj[k][2])) continue;
 
-                    bool bAlready = false;
-                    for (int32 s = 0; s < NumEmittedBands; ++s)
-                        if (EmittedBands[s] == BandKey) { bAlready = true; break; }
-                    if (bAlready) continue;
-                    if (NumEmittedBands < UE_ARRAY_COUNT(EmittedBands)) EmittedBands[NumEmittedBands++] = BandKey;
-
-                    const FSmoothVertex& R0 = Corner(c0);
-                    const FSmoothVertex& R1 = Corner(c1);
                     FSmoothVertex S0 = GetSmoothVertexEx(V0[0], V0[1], V0[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
                     FSmoothVertex S1 = GetSmoothVertexEx(V1[0], V1[1], V1[2], Adj[k][0], Adj[k][1], Adj[k][2], HeightGrid, Neighborhood, ChunkCoord, CaveCache);
 
@@ -3096,6 +3104,20 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                         };
                     OverrideCorner(S0, BandWants);
                     OverrideCorner(S1, BandWants);
+
+                    // Both sides put this edge in the same place, which is now the usual case.
+                    // Rejected before the dedupe table so it only ever holds bands that emit.
+                    if (Same(R0.P, S0.P) && Same(R1.P, S1.P)) continue;
+
+                    const int32 EdgeKey = FMath::Min(c0, c1) * 8 + FMath::Max(c0, c1);
+                    const int32 AdjKey = (Adj[k][0] - lx + 1) + (Adj[k][1] - ly + 1) * 3 + (Adj[k][2] - lz + 1) * 9;
+                    const uint16 BandKey = (uint16)(EdgeKey * 27 + AdjKey);
+
+                    bool bAlready = false;
+                    for (int32 s = 0; s < NumEmittedBands; ++s)
+                        if (EmittedBands[s] == BandKey) { bAlready = true; break; }
+                    if (bAlready) continue;
+                    if (NumEmittedBands < UE_ARRAY_COUNT(EmittedBands)) EmittedBands[NumEmittedBands++] = BandKey;
 
                     // The band continues this face's surface past the rim, so it walks the
                     // shared edge in the opposite direction to the face that owns it.
