@@ -1940,74 +1940,217 @@ bool FCaveSmoothCache::GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& Ou
 
     BaseState[I] = 1;
 
-    int32 GroundMin = MAX_int32;
-    for (int32 dy = -1; dy <= 0; ++dy)
-        for (int32 dx = -1; dx <= 0; ++dx)
+    // Gap between the largest and a smaller normal component inside which an anchor blends in
+    // its projection along that smaller axis. The weights are symmetric, so exactly on a seam
+    // two tied axes contribute 50/50 no matter which one won the tie. Wider spreads the seam's
+    // phase shift over more rows; narrower keeps more of the pure projected grid.
+    static constexpr float SeamBand = 0.12f;
+
+    // Everything a lattice vertex can decide from its own eight cells and the four ground
+    // columns under them. A pure function of generated state, so any chunk that can see those
+    // cells computes a bit-identical answer.
+    struct FVertexSolve
+    {
+        FVector3f Normal = FVector3f::ZeroVector;
+        FVector3f Anchor = FVector3f::ZeroVector;
+        FVector3f Mass = FVector3f::ZeroVector;
+        float     CrossOff[3] = { 0.0f, 0.0f, 0.0f };
+        bool      bCross[3] = { false, false, false };
+        bool      bLayerMixed[3][2] = { { false, false }, { false, false }, { false, false } };
+        int32     Dom = 2;
+        int32     GroundMin = 0;
+        bool      bAnchor = false;
+    };
+
+    auto Solve = [this](int32 x, int32 y, int32 z, FVertexSolve& Out) -> bool
         {
-            const int32 GL = Config->GetGroundLevelLocal(vx + dx, vy + dy, *Heights);
-            if (vz > GL) return false;
-            GroundMin = FMath::Min(GroundMin, GL);
-        }
+            // The dual cube reads cells x-1..x and y-1..y, which must stay inside the
+            // [-2, CS+1] ring the cell and column caches cover.
+            if (x - 1 < -2 || x > CS + 1 || y - 1 < -2 || y > CS + 1) return false;
+            if (z < 1 || z >= Config->MaxHeight) return false;
 
-    float D[8];
+            int32 GroundMin = MAX_int32;
+            for (int32 dy = -1; dy <= 0; ++dy)
+            {
+                for (int32 dx = -1; dx <= 0; ++dx)
+                {
+                    const int32 GL = Config->GetGroundLevelLocal(x + dx, y + dy, *Heights);
+                    if (z > GL) return false;
+                    GroundMin = FMath::Min(GroundMin, GL);
+                }
+            }
+            Out.GroundMin = GroundMin;
+
+            float D[8];
+            bool bAnyAir = false, bAnySolid = false;
+            for (int32 c = 0; c < 8; ++c)
+            {
+                D[c] = GetCellDensity(x - 1 + (c & 1), y - 1 + ((c >> 1) & 1), z - 1 + ((c >> 2) & 1));
+                if (D[c] > 0.0f) bAnyAir = true; else bAnySolid = true;
+            }
+            if (!bAnyAir || !bAnySolid) return false;
+
+            // Face-group sums of the dual cube, one pair per axis: the field on the lattice line
+            // through this vertex along that axis, on the cell layers either side of it. Their
+            // difference is the same central-difference gradient as before.
+            float Sum[3][2];
+            for (int32 a = 0; a < 3; ++a)
+            {
+                float Lo = 0.0f, Hi = 0.0f;
+                bool bAir[2] = { false, false }, bSolid[2] = { false, false };
+                for (int32 c = 0; c < 8; ++c)
+                {
+                    const int32 Side = (c >> a) & 1;
+                    if (Side) Hi += D[c]; else Lo += D[c];
+                    if (D[c] > 0.0f) bAir[Side] = true; else bSolid[Side] = true;
+                }
+                Sum[a][0] = Lo;
+                Sum[a][1] = Hi;
+                Out.bLayerMixed[a][0] = bAir[0] && bSolid[0];
+                Out.bLayerMixed[a][1] = bAir[1] && bSolid[1];
+
+                Out.bCross[a] = (Lo > 0.0f) != (Hi > 0.0f);
+                if (Out.bCross[a])
+                {
+                    const float Denom = Lo - Hi;
+                    const float t = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : Lo / Denom, 0.0f, 1.0f);
+                    Out.CrossOff[a] = t - 0.5f;
+                }
+            }
+
+            const FVector3f Grad(Sum[0][1] - Sum[0][0], Sum[1][1] - Sum[1][0], Sum[2][1] - Sum[2][0]);
+            Out.Normal = (Grad.SizeSquared() > 1.e-12f) ? Grad.GetUnsafeNormal() : FVector3f::ZeroVector;
+
+            const float AX = FMath::Abs(Grad.X), AY = FMath::Abs(Grad.Y), AZ = FMath::Abs(Grad.Z);
+            Out.Dom = (AX > AY && AX > AZ) ? 0 : ((AY > AZ) ? 1 : 2);
+
+            // Mass point of the edge crossings: the fallback for a vertex that neither owns a
+            // crossing nor finds an anchor to merge into.
+            FVector3f MassSum(0.0f, 0.0f, 0.0f);
+            int32 Count = 0;
+            for (int32 e = 0; e < 12; ++e)
+            {
+                const int32 c0 = CaveCubeEdges[e][0];
+                const int32 c1 = CaveCubeEdges[e][1];
+                const float F0 = D[c0];
+                const float F1 = D[c1];
+                if ((F0 > 0.0f) == (F1 > 0.0f)) continue;
+
+                const float Denom = F0 - F1;
+                const float t = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : F0 / Denom, 0.0f, 1.0f);
+                const FVector3f P0 = CaveCubeCorner(c0);
+                MassSum += P0 + (CaveCubeCorner(c1) - P0) * t;
+                ++Count;
+            }
+            if (Count == 0) return false;
+
+            Out.Mass = MassSum * (1.0f / (float)Count);
+            Out.Mass.Z = FMath::Min(Out.Mass.Z, (float)GroundMin - (float)z);
+
+            // Anchor: owns the crossing on its dominant-axis lattice line.
+            Out.bAnchor = Out.bCross[Out.Dom];
+            if (!Out.bAnchor) return true;
+
+            // Away from a seam this is the pure projection along the dominant axis, which is what
+            // makes each region a clean projected grid. Near a seam every near-tied axis adds its
+            // own projection: the measured crossing on that axis's line when this vertex owns it,
+            // otherwise the tangent-plane intersection with that line.
+            const int32 Dm = Out.Dom;
+            const float NAbs[3] = { FMath::Abs(Out.Normal.X), FMath::Abs(Out.Normal.Y), FMath::Abs(Out.Normal.Z) };
+            const float OffDom = Out.CrossOff[Dm];
+
+            FVector3f Acc(0.0f, 0.0f, 0.0f);
+            float WSum = 0.0f;
+            for (int32 a = 0; a < 3; ++a)
+            {
+                float Wa = 1.0f;
+                float Sa = OffDom;
+                if (a != Dm)
+                {
+                    const float Tb = FMath::Clamp((NAbs[Dm] - NAbs[a]) / SeamBand, 0.0f, 1.0f);
+                    Wa = 1.0f - Tb * Tb * (3.0f - 2.0f * Tb);
+                    if (Wa <= 0.0f) continue;
+
+                    if (Out.bCross[a])          Sa = Out.CrossOff[a];
+                    else if (NAbs[a] > 1.e-3f)  Sa = FMath::Clamp(OffDom * Out.Normal[Dm] / Out.Normal[a], -1.5f, 1.5f);
+                    else continue;
+                }
+
+                FVector3f Cand(0.0f, 0.0f, 0.0f);
+                Cand[a] = Sa;
+                Acc += Cand * Wa;
+                WSum += Wa;
+            }
+
+            Out.Anchor = Acc * (1.0f / WSum);
+            Out.Anchor.Z = FMath::Min(Out.Anchor.Z, (float)GroundMin - (float)z);
+            return true;
+        };
+
+    FVertexSolve Self;
+    if (!Solve(vx, vy, vz, Self)) return false;
+
+    FVector3f Off = Self.Mass;
+    FVector3f Nrm = Self.Normal;
+
+    if (Self.bAnchor)
     {
-        bool bAnyAir = false, bAnySolid = false;
-        for (int32 c = 0; c < 8; ++c)
+        Off = Self.Anchor;
+    }
+    else
+    {
+        // A riser end takes the exact position and normal of an adjacent anchor, which folds the
+        // riser between them to zero width. The dominant axis is tried first; on a seam the next
+        // most aligned axis often has the anchor instead, and taking it keeps the vertex on the
+        // grid rather than dropping to the mass point. The shared cell layer must be mixed so the
+        // lattice edge between the two is a real mesh edge, and only anchors are targets, so
+        // merges never chain.
+        const FVector3f& Nn = Self.Normal;
+        int32 Order[3] = { Self.Dom, (Self.Dom + 1) % 3, (Self.Dom + 2) % 3 };
+        if (FMath::Abs(Nn[Order[2]]) > FMath::Abs(Nn[Order[1]])) Swap(Order[1], Order[2]);
+
+        for (int32 oi = 0; oi < 3; ++oi)
         {
-            D[c] = GetCellDensity(vx - 1 + (c & 1), vy - 1 + ((c >> 1) & 1), vz - 1 + ((c >> 2) & 1));
-            if (D[c] > 0.0f) bAnyAir = true; else bAnySolid = true;
+            const int32 d = Order[oi];
+
+            FVertexSolve Nb[2];
+            bool bUse[2] = { false, false };
+            float Dist[2] = { 0.0f, 0.0f };
+
+            for (int32 k = 0; k < 2; ++k)
+            {
+                if (!Self.bLayerMixed[d][k]) continue;
+
+                const int32 Sgn = k ? 1 : -1;
+                int32 Wc[3] = { vx, vy, vz };
+                Wc[d] += Sgn;
+
+                if (!Solve(Wc[0], Wc[1], Wc[2], Nb[k])) continue;
+                if (!Nb[k].bAnchor || !Nb[k].bCross[d]) continue;
+
+                bUse[k] = true;
+                Dist[k] = FMath::Abs((float)Sgn + Nb[k].CrossOff[d]);
+            }
+
+            int32 Pick = -1;
+            if (bUse[0] && bUse[1]) Pick = (Dist[1] < Dist[0]) ? 1 : 0;
+            else if (bUse[0])       Pick = 0;
+            else if (bUse[1])       Pick = 1;
+            if (Pick < 0) continue;
+
+            Off = Nb[Pick].Anchor;
+            Off[d] += Pick ? 1.0f : -1.0f;
+            Nrm = Nb[Pick].Normal;
+            Off.Z = FMath::Min(Off.Z, (float)Self.GroundMin - (float)vz);
+            break;
         }
-        if (!bAnyAir || !bAnySolid) return false;
     }
 
-    // Central difference of the eight cell densities across the unit cube. The corner bit
-    // layout is the same one CaveCubeCorner uses, so each sum is one face group of the cube.
-    // D > 0 is air, so the gradient already points out of the solid and needs no negation.
-    {
-        const FVector3f Grad(
-            (D[1] + D[3] + D[5] + D[7]) - (D[0] + D[2] + D[4] + D[6]),
-            (D[2] + D[3] + D[6] + D[7]) - (D[0] + D[1] + D[4] + D[5]),
-            (D[4] + D[5] + D[6] + D[7]) - (D[0] + D[1] + D[2] + D[3]));
-
-        OutNormal = (Grad.SizeSquared() > 1.e-12f) ? Grad.GetUnsafeNormal() : FVector3f::ZeroVector;
-    }
-
-    // Every edge that changes sign contributes its linearly interpolated crossing, and the
-    // vertex lands on their average. The crossings come from all three axes at once, so an
-    // acute wall junction pulls the vertex diagonally into the corner instead of sliding it
-    // along whichever single axis happened to have the steepest slab gradient.
-    FVector3f Sum(0.0f, 0.0f, 0.0f);
-    int32 Count = 0;
-
-    for (int32 e = 0; e < 12; ++e)
-    {
-        const int32 c0 = CaveCubeEdges[e][0];
-        const int32 c1 = CaveCubeEdges[e][1];
-        const float F0 = D[c0];
-        const float F1 = D[c1];
-        if ((F0 > 0.0f) == (F1 > 0.0f)) continue;
-
-        const float Denom = F0 - F1;
-        const float t = FMath::Clamp(FMath::IsNearlyZero(Denom) ? 0.5f : F0 / Denom, 0.0f, 1.0f);
-
-        const FVector3f P0 = CaveCubeCorner(c0);
-        Sum += P0 + (CaveCubeCorner(c1) - P0) * t;
-        ++Count;
-    }
-
-    if (Count == 0) return false;
-
-    OutOffset = Sum * (1.0f / (float)Count);
-
-    // The mass point is a convex combination of points on the cube, so the vertex stays
-    // inside its own dual cell and X/Y need no clamp. Z keeps the ground guard: GroundMin
-    // is never below vz here, so this only ever limits upward travel into the height-field
-    // surface, which owns that geometry.
-    OutOffset.Z = FMath::Min(OutOffset.Z, (float)GroundMin - (float)vz);
-
-    BaseOffsetCache[I] = OutOffset;
-    BaseNormalCache[I] = OutNormal;
+    BaseOffsetCache[I] = Off;
+    BaseNormalCache[I] = Nrm;
     BaseState[I] = 2;
+    OutOffset = Off;
+    OutNormal = Nrm;
     return true;
 }
 
@@ -2053,6 +2196,28 @@ FLinearColor FTerrainGenConfig::GetStylizedColorForVoxel(const FVector& WorldPos
     else if (VoxelType == EVoxelType::Dirt) return FastColorLerp(FLinearColor(0.12f, 0.07f, 0.05f, 1.0f), FLinearColor(0.20f, 0.12f, 0.08f, 1.0f), FastPerlinNoise2D(VoxX * 0.1f, VoxY * 0.1f) * 0.5f + 0.5f);
     else if (VoxelType == EVoxelType::Stone) return FastColorLerp(FLinearColor(0.18f, 0.20f, 0.22f, 1.0f), FLinearColor(0.30f, 0.32f, 0.34f, 1.0f), FastPerlinNoise3D(VoxX * 0.08f, VoxY * 0.08f, VoxZ * 0.08f) * 0.5f + 0.5f);
     return FLinearColor::White;
+}
+
+// Cave quads are split along a diagonal fixed by the lattice, not by their shape. Every
+// face table passes the diagonal joining the face's min and max in-plane corners, so a run
+// of faces with one orientation triangulates identically and the wireframe reads as a grid.
+// The only override is a split that would fold one triangle back over the other, which
+// needs a non-convex quad: rare, local, and fixing a real error rather than a preference.
+static bool ChooseQuadDiagonal(const FVector& A, const FVector& B, const FVector& C, const FVector& D, bool bPreferBD)
+{
+    auto Folds = [](const FVector& P0, const FVector& P1, const FVector& P2,
+        const FVector& Q0, const FVector& Q1, const FVector& Q2)
+        {
+            const FVector N0 = FVector::CrossProduct(P2 - P0, P1 - P0);
+            const FVector N1 = FVector::CrossProduct(Q2 - Q0, Q1 - Q0);
+            return FVector::DotProduct(N0, N1) < 0.0;
+        };
+
+    const bool bFoldAC = Folds(A, B, C, A, C, D);
+    const bool bFoldBD = Folds(B, C, D, B, D, A);
+
+    if (bPreferBD) return !(bFoldBD && !bFoldAC);
+    return bFoldAC && !bFoldBD;
 }
 
 void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDynamicMesh3& Mesh, FTriIDArray& OutTriIDs, const FLocalHeightGrid& HeightGrid, const FChunkNeighborhood& Neighborhood, const FIntVector& ChunkCoord, FCaveSmoothCache* CaveCache) const
@@ -2189,14 +2354,9 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
     auto AddQuadWorldSmooth = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D,
         int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
         {
-            // Both splits preserve the loop winding, so the diagonal is free to follow the
-            // geometry. On a displaced quad the shorter diagonal runs along the wall instead
-            // of cutting across it, which is what gives cave surfaces their creased look.
-            // Planar quads tie exactly and keep the caller's choice.
-            const double DiagAC = FVector::DistSquared(A, C);
-            const double DiagBD = FVector::DistSquared(B, D);
-            if (DiagAC < DiagBD)      bDiagBD = false;
-            else if (DiagBD < DiagAC) bDiagBD = true;
+            // The caller's diagonal comes from the lattice, so every quad of one face
+            // orientation is cut the same way. It only changes where that cut would fold.
+            bDiagBD = ChooseQuadDiagonal(A, B, C, D, bDiagBD);
 
             const FVector* P[4] = { &A, &B, &C, &D };
             int32 T[2][3];
@@ -2245,52 +2405,52 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
         };
 
     // A curved replacement for AddQuadWorldSmooth. The quad's corners map to
- // A=(u0,v0) B=(u1,v0) C=(u1,v1) D=(u0,v1), so the sub-cell winding below matches
- // the caller's loop order exactly and the shorter-diagonal rule still applies.
+  // A=(u0,v0) B=(u1,v0) C=(u1,v1) D=(u0,v1), so the sub-cell winding below matches the
+  // caller's loop order and the caller's lattice diagonal carries into every sub-cell.
     auto AddPatchSmooth = [&](const FSmoothVertex& A, const FSmoothVertex& B,
         const FSmoothVertex& C, const FSmoothVertex& Dv,
         int32 MatID, int32 UAxis, int32 VAxis, bool bDiagBD)
         {
-            // Whether an edge bends must depend only on that lattice edge and its two
-            // endpoints, never on the patch that happens to own it. Both tests here read the
-            // endpoints alone: their provenance, and the angle between their field normals.
-            auto EdgeBends = [&](const FSmoothVertex& P0, const FSmoothVertex& P1)
-                {
-                    if (!bBendCaveFaces) return false;
-                    if (!P0.bCurved || !P1.bCurved) return false;
-                    return FVector3f::DotProduct(P0.N, P1.N) < CavePatchFlatDot;
-                };
+            const FSmoothVertex* Q[4] = { &A, &B, &C, &Dv };
 
-            // Same rule for roughness: an edge is rough when both endpoints are cave-surface
-            // vertices. The patch on the other side reads the same two endpoints, so it
-            // reaches the same answer and cuts the shared edge the same way.
+            // Edge e runs Q[e] -> Q[e+1]: AB (v=0), BC (u=1), CD (v=1), DA (u=0). Merged riser
+            // ends make corners coincide. Two or more collapsed edges leave a line or a point and
+            // emit nothing; one collapsed edge leaves a triangle, handled below.
+            const double CollapseTolSq = FMath::Square(1.0e-3 * (double)CubeSize);
+            bool bCol[4];
+            int32 NumCol = 0;
+            for (int32 e = 0; e < 4; ++e)
+            {
+                bCol[e] = FVector::DistSquared(Q[e]->P, Q[(e + 1) & 3]->P) <= CollapseTolSq;
+                NumCol += bCol[e] ? 1 : 0;
+            }
+            if (NumCol >= 2) return;
+
             const bool bRoughOn = CaveRoughness.bEnableCaveRoughness
                 && CaveRoughness.MicroDepth > 0.0f
                 && CaveRoughness.DetailSubdivisions > 1;
 
-            auto EdgeRough = [&](const FSmoothVertex& P0, const FSmoothVertex& P1)
-                {
-                    return bRoughOn && P0.bCurved && P1.bCurved;
-                };
+            // Bending and roughness are decided per lattice edge from its two endpoints alone, so
+            // the patch on the other side of the edge reaches the same answer. A collapsed edge
+            // does neither.
+            bool bBend[4], bRough[4];
+            bool bAnyRough = false;
+            for (int32 e = 0; e < 4; ++e)
+            {
+                const FSmoothVertex& E0 = *Q[e];
+                const FSmoothVertex& E1 = *Q[(e + 1) & 3];
+                const bool bBothCurved = E0.bCurved && E1.bCurved;
+                bBend[e] = !bCol[e] && bBendCaveFaces && bBothCurved
+                    && FVector3f::DotProduct(E0.N, E1.N) < CavePatchFlatDot;
+                bRough[e] = !bCol[e] && bRoughOn && bBothCurved;
+                bAnyRough |= bRough[e];
+            }
 
-            const bool bEdgeAB = EdgeBends(A, B);    // v = 0
-            const bool bEdgeBC = EdgeBends(B, C);    // u = 1
-            const bool bEdgeDC = EdgeBends(Dv, C);   // v = 1
-            const bool bEdgeAD = EdgeBends(A, Dv);   // u = 0
-
-            const bool bRoughAB = EdgeRough(A, B);
-            const bool bRoughBC = EdgeRough(B, C);
-            const bool bRoughDC = EdgeRough(Dv, C);
-            const bool bRoughAD = EdgeRough(A, Dv);
-
-            const bool bAnyBend = bEdgeAB || bEdgeBC || bEdgeDC || bEdgeAD;
-            const bool bAnyRough = bRoughAB || bRoughBC || bRoughDC || bRoughAD;
-
-            // One subdivision count shared by every patch that subdivides at all. Two patches
-            // meeting on a bent or rough edge have to cut it identically or the seam opens,
-            // and a straight edge stays collinear at any N, so a single constant is both
-            // sufficient and the only safe choice.
-            const int32 N = (bAnyBend || bAnyRough)
+            // Every patch touching the cave surface uses the same N, so any edge two cave patches
+            // share is cut identically from both sides.
+            const bool bCavePatch = A.bCurved || B.bCurved || C.bCurved || Dv.bCurved;
+            const bool bShapingOn = bBendCaveFaces || bRoughOn;
+            const int32 N = (bCavePatch && bShapingOn)
                 ? FMath::Clamp(FMath::Max(CavePatchSubdiv, bRoughOn ? CaveRoughness.DetailSubdivisions : 1), 1, 6)
                 : 1;
 
@@ -2312,126 +2472,299 @@ void FTerrainGenConfig::AppendVoxelFacesLocal(int32 lx, int32 ly, int32 lz, FDyn
                     return s * s * s * P0.P + 3.0 * s * s * t * b1 + 3.0 * s * t * t * b2 + t * t * t * P1.P;
                 };
 
-            auto PatchPoint = [&](double u, double v) -> FVector
+            // Symmetric, zero at both ends: a shared edge carves the same from either side.
+            auto RoughHat = [](double t) { const double h = 4.0 * t * (1.0 - t); return h * h; };
+
+            const int32 Stride = N + 1;
+            const int32 NumGrid = Stride * Stride;
+            TArray<FVector, TInlineAllocator<49>> Base; Base.SetNumUninitialized(NumGrid);
+            TArray<FVector, TInlineAllocator<49>> VPos; VPos.SetNumUninitialized(NumGrid);
+            TArray<int32, TInlineAllocator<49>>   VIdx; VIdx.SetNumUninitialized(NumGrid);
+            TArray<int32, TInlineAllocator<49>>   UIdx; UIdx.SetNumUninitialized(NumGrid);
+
+            const double InvN = 1.0 / (double)N;
+            const double SubMinCross = MinCross / (double)(N * N);
+
+            // Cuts one sample into the rock. On a boundary the direction may only use what both
+            // patches agree on (lerped endpoint normals, minus the chord component so the cut
+            // never slides along the edge). Inside, it follows the patch's own surface normal so
+            // the sample moves into the rock and not across the grid. The field normal sets the
+            // depth sample and the sign.
+            auto CarveAt = [&](const FVector& P, float W, const FVector3f& FieldN,
+                const FVector* Chord, const FVector& SurfN) -> FVector
                 {
-                    const FVector Cu0 = EdgePoint(A, B, u, bEdgeAB);
-                    const FVector Cu1 = EdgePoint(Dv, C, u, bEdgeDC);
-                    const FVector Cv0 = EdgePoint(A, Dv, v, bEdgeAD);
-                    const FVector Cv1 = EdgePoint(B, C, v, bEdgeBC);
+                    if (W <= 0.0f || FieldN.IsNearlyZero()) return P;
+
+                    FVector Dir((double)FieldN.X, (double)FieldN.Y, (double)FieldN.Z);
+                    if (Chord)
+                    {
+                        const FVector Tan = Chord->GetSafeNormal();
+                        const FVector Perp = Dir - Tan * FVector::DotProduct(Dir, Tan);
+                        if (!Perp.IsNearlyZero()) Dir = Perp.GetUnsafeNormal();
+                    }
+                    else if (!SurfN.IsNearlyZero())
+                    {
+                        const FVector Gn = SurfN.GetUnsafeNormal();
+                        Dir = (FVector::DotProduct(Gn, Dir) < 0.0) ? -Gn : Gn;
+                    }
+
+                    const float Depth = GetCaveRoughDepth(
+                        (float)P.X * InvCubeSize,
+                        (float)P.Y * InvCubeSize,
+                        (float)P.Z * InvCubeSize,
+                        FieldN, 0.0f, W);
+                    return (Depth > 0.0f) ? P - Dir * ((double)Depth * (double)CubeSize) : P;
+                };
+
+            auto Store = [&](int32 k, const FVector& P)
+                {
+                    VPos[k] = P;
+                    VIdx[k] = Mesh.AppendVertex(FVector3d(P));
+                    UIdx[k] = UVOverlay->AppendElement(UVAt(P, UAxis, VAxis));
+                };
+
+            auto EmitSub = [&](int32 k0, int32 k1, int32 k2)
+                {
+                    const FVector X = FVector::CrossProduct(VPos[k2] - VPos[k0], VPos[k1] - VPos[k0]);
+                    if (X.Size() <= SubMinCross) return;
+
+                    const int32 t = Mesh.AppendTriangle(VIdx[k0], VIdx[k1], VIdx[k2]);
+                    if (t == FDynamicMesh3::InvalidID) return;
+
+                    OutTriIDs.Add(t);
+                    const FVector3f Nf(X.GetSafeNormal());
+                    NormalOverlay->SetTriangle(t, FIndex3i(
+                        NormalOverlay->AppendElement(Nf),
+                        NormalOverlay->AppendElement(Nf),
+                        NormalOverlay->AppendElement(Nf)
+                    ));
+                    UVOverlay->SetTriangle(t, FIndex3i(UIdx[k0], UIdx[k1], UIdx[k2]));
+                    ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
+                    if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
+                };
+
+            auto EmitCell = [&](int32 q0, int32 q1, int32 q2, int32 q3, bool bPreferBD)
+                {
+                    if (!ChooseQuadDiagonal(VPos[q0], VPos[q1], VPos[q2], VPos[q3], bPreferBD))
+                    {
+                        EmitSub(q0, q1, q2);
+                        EmitSub(q0, q2, q3);
+                    }
+                    else
+                    {
+                        EmitSub(q1, q2, q3);
+                        EmitSub(q1, q3, q0);
+                    }
+                };
+
+            if (NumCol == 1)
+            {
+                // Two neighbouring riser ends that merged along different axes leave two faces that
+                // are each half of the same grid cell, meeting along its long edge. Subdividing each
+                // half as a triangular slice of an NxN grid, with every diagonal parallel to that
+                // long edge, makes the pair read as one clean cell instead of two fans. Every edge is
+                // still cut into N segments from its endpoints alone, so the seams hold whether the
+                // halves pair up or not.
+                int32 K = 0;
+                while (!bCol[K]) ++K;
+
+                // Triangle corner m is quad corner K+1+m, and triangle edge m (corner m to m+1) is
+                // quad edge K+1+m. Corner 0 stands for both ends of the collapsed edge.
+                const FSmoothVertex* Tri[3];
+                bool bTriBend[3], bTriRough[3];
+                for (int32 m = 0; m < 3; ++m)
+                {
+                    const int32 e = (K + 1 + m) & 3;
+                    Tri[m] = Q[e];
+                    bTriBend[m] = bBend[e];
+                    bTriRough[m] = bRough[e];
+                }
+
+                // The long edge is the cell's diagonal. The corner opposite it is the grid origin.
+                int32 H = 0;
+                double BestLenSq = -1.0;
+                for (int32 m = 0; m < 3; ++m)
+                {
+                    const double LenSq = FVector::DistSquared(Tri[m]->P, Tri[(m + 1) % 3]->P);
+                    if (LenSq > BestLenSq) { BestLenSq = LenSq; H = m; }
+                }
+                const int32 LA = (H + 2) % 3;   // edge TO -> TP1
+                const int32 LB = (H + 1) % 3;   // edge TP2 -> TO
+
+                const FSmoothVertex& TO = *Tri[LA];
+                const FSmoothVertex& TP1 = *Tri[H];
+                const FSmoothVertex& TP2 = *Tri[LB];
+
+                // Legs are exact edge curves, the long edge is its exact curve from TP2 to TP1, and
+                // the interior is the translational surface of the legs plus a correction that
+                // vanishes on the legs and makes the long edge exact.
+                auto TriBase = [&](int32 i, int32 j) -> FVector
+                    {
+                        const double u = (double)i * InvN;
+                        const double v = (double)j * InvN;
+                        if (j == 0)     return EdgePoint(TO, TP1, u, bTriBend[LA]);
+                        if (i == 0)     return EdgePoint(TO, TP2, v, bTriBend[LB]);
+                        if (i + j == N) return EdgePoint(TP2, TP1, u, bTriBend[H]);
+
+                        const double s = u + v;
+                        const double t = u / s;
+                        const FVector L1 = EdgePoint(TO, TP1, u, bTriBend[LA]);
+                        const FVector L2 = EdgePoint(TO, TP2, v, bTriBend[LB]);
+                        const FVector Hy = EdgePoint(TP2, TP1, t, bTriBend[H]);
+                        const FVector Qh = EdgePoint(TO, TP1, t, bTriBend[LA]) + EdgePoint(TO, TP2, 1.0 - t, bTriBend[LB]) - TO.P;
+                        return L1 + L2 - TO.P + s * (Hy - Qh);
+                    };
+
+                // Each edge's hat is weighted by barycentric closeness to that edge, so on any edge
+                // the weight is exactly that edge's hat, as it is on the quad on the other side.
+                auto TriWeight = [&](double u, double v) -> float
+                    {
+                        if (!bAnyRough) return 0.0f;
+                        const double L0 = FMath::Max(0.0, 1.0 - u - v);
+                        auto Term = [&](bool bOn, double La, double Lb, double LOpp) -> double
+                            {
+                                const double Sm = La + Lb;
+                                return (bOn && Sm > 1.e-12) ? (1.0 - LOpp) * RoughHat(Lb / Sm) : 0.0;
+                            };
+                        const double Wt = Term(bTriRough[LA], L0, u, v)
+                            + Term(bTriRough[LB], L0, v, u)
+                            + Term(bTriRough[H], v, u, L0);
+                        return (float)FMath::Min(1.0, Wt);
+                    };
+
+                const FVector3f NO = TO.bCurved ? TO.N : FVector3f::ZeroVector;
+                const FVector3f NP1 = TP1.bCurved ? TP1.N : FVector3f::ZeroVector;
+                const FVector3f NP2 = TP2.bCurved ? TP2.N : FVector3f::ZeroVector;
+                auto TriNormal = [&](double u, double v) -> FVector3f
+                    {
+                        const float L0 = (float)FMath::Max(0.0, 1.0 - u - v);
+                        return (NO * L0 + NP1 * (float)u + NP2 * (float)v).GetSafeNormal();
+                    };
+
+                for (int32 j = 0; j <= N; ++j)
+                {
+                    for (int32 i = 0; i + j <= N; ++i)
+                    {
+                        Base[i + j * Stride] = TriBase(i, j);
+                    }
+                }
+
+                for (int32 j = 0; j <= N; ++j)
+                {
+                    for (int32 i = 0; i + j <= N; ++i)
+                    {
+                        const int32 k = i + j * Stride;
+                        const double u = (double)i * InvN;
+                        const double v = (double)j * InvN;
+
+                        FVector P = Base[k];
+                        const float W = TriWeight(u, v);
+                        if (W > 0.0f)
+                        {
+                            FVector Chord = FVector::ZeroVector;
+                            bool bChord = true;
+                            if (j == 0)          Chord = TP1.P - TO.P;
+                            else if (i == 0)     Chord = TP2.P - TO.P;
+                            else if (i + j == N) Chord = TP1.P - TP2.P;
+                            else                 bChord = false;
+
+                            const FVector SurfN = bChord ? FVector::ZeroVector
+                                : FVector::CrossProduct(Base[k + 1] - Base[k - 1], Base[k + Stride] - Base[k - Stride]);
+                            P = CarveAt(P, W, TriNormal(u, v), bChord ? &Chord : nullptr, SurfN);
+                        }
+                        Store(k, P);
+                    }
+                }
+
+                for (int32 j = 0; j < N; ++j)
+                {
+                    for (int32 i = 0; i + j < N; ++i)
+                    {
+                        const int32 q0 = i + j * Stride;
+                        const int32 q1 = q0 + 1;
+                        const int32 q3 = q0 + Stride;
+                        if (i + j + 1 < N) EmitCell(q0, q1, q3 + 1, q3, true);   // BD runs parallel to the long edge
+                        else               EmitSub(q0, q1, q3);                   // the sliver on the long edge
+                    }
+                }
+                return;
+            }
+
+            auto QuadPoint = [&](double u, double v) -> FVector
+                {
+                    const FVector Cu0 = EdgePoint(A, B, u, bBend[0]);
+                    const FVector Cu1 = EdgePoint(Dv, C, u, bBend[2]);
+                    const FVector Cv0 = EdgePoint(A, Dv, v, bBend[3]);
+                    const FVector Cv1 = EdgePoint(B, C, v, bBend[1]);
                     const FVector Bl = (1.0 - u) * (1.0 - v) * A.P + u * (1.0 - v) * B.P
                         + u * v * C.P + (1.0 - u) * v * Dv.P;
                     return (1.0 - v) * Cu0 + v * Cu1 + (1.0 - u) * Cv0 + u * Cv1 - Bl;
                 };
 
-            // Micro roughness weight. Zero at all four lattice corners, which is what leaves
-            // the one-voxel cage of the mesh exactly where it was and gives a character
-            // capsule an unbroken surface to ride. On a boundary this collapses to a function
-            // of that edge's parameter alone, and the hat is symmetric, so it does not matter
-            // which direction the neighbouring patch walks the shared edge.
-            auto RoughHat = [](double t) { const double h = 4.0 * t * (1.0 - t); return h * h; };
-
-            auto MicroWeight = [&](double u, double v) -> float
+            auto QuadWeight = [&](double u, double v) -> float
                 {
                     if (!bAnyRough) return 0.0f;
-                    const double wAB = bRoughAB ? RoughHat(u) : 0.0;
-                    const double wDC = bRoughDC ? RoughHat(u) : 0.0;
-                    const double wAD = bRoughAD ? RoughHat(v) : 0.0;
-                    const double wBC = bRoughBC ? RoughHat(v) : 0.0;
-                    const double W = (1.0 - v) * wAB + v * wDC + (1.0 - u) * wAD + u * wBC;
-                    return (float)FMath::Min(1.0, W);
+                    const double wAB = bRough[0] ? RoughHat(u) : 0.0;
+                    const double wDC = bRough[2] ? RoughHat(u) : 0.0;
+                    const double wAD = bRough[3] ? RoughHat(v) : 0.0;
+                    const double wBC = bRough[1] ? RoughHat(v) : 0.0;
+                    const double Wt = (1.0 - v) * wAB + v * wDC + (1.0 - u) * wAD + u * wBC;
+                    return (float)FMath::Min(1.0, Wt);
                 };
 
-            // A corner that is not a cave vertex contributes nothing to the carve direction,
-            // so on the boundary of the rough region the direction is driven by the cave side
-            // alone and the weight has already faded to zero anyway.
             const FVector3f NA = A.bCurved ? A.N : FVector3f::ZeroVector;
             const FVector3f NB = B.bCurved ? B.N : FVector3f::ZeroVector;
             const FVector3f NC = C.bCurved ? C.N : FVector3f::ZeroVector;
             const FVector3f ND = Dv.bCurved ? Dv.N : FVector3f::ZeroVector;
-
-            auto PatchNormal = [&](double u, double v) -> FVector3f
+            auto QuadNormal = [&](double u, double v) -> FVector3f
                 {
-                    const FVector3f Nn =
-                        NA * (float)((1.0 - u) * (1.0 - v)) + NB * (float)(u * (1.0 - v)) +
-                        NC * (float)(u * v) + ND * (float)((1.0 - u) * v);
-                    return Nn.GetSafeNormal();
+                    return (NA * (float)((1.0 - u) * (1.0 - v)) + NB * (float)(u * (1.0 - v)) +
+                        NC * (float)(u * v) + ND * (float)((1.0 - u) * v)).GetSafeNormal();
                 };
 
-            const int32 Stride = N + 1;
-            TArray<FVector, TInlineAllocator<49>> VPos; VPos.SetNumUninitialized(Stride * Stride);
-            TArray<int32, TInlineAllocator<49>>   VIdx; VIdx.SetNumUninitialized(Stride * Stride);
-            // UVs are a function of position, so they are shared per grid vertex exactly as
-            // the positions are. At N=2 that is 9 elements instead of 24.
-            TArray<int32, TInlineAllocator<49>>   UIdx; UIdx.SetNumUninitialized(Stride * Stride);
-
-            const double InvN = 1.0 / (double)N;
             for (int32 j = 0; j <= N; ++j)
             {
                 for (int32 i = 0; i <= N; ++i)
                 {
-                    const double u = (double)i * InvN;
-                    const double v = (double)j * InvN;
-
-                    FVector P = PatchPoint(u, v);
-
-                    const float W = MicroWeight(u, v);
-                    if (W > 0.0f)
-                    {
-                        const FVector3f Nn = PatchNormal(u, v);
-                        if (!Nn.IsNearlyZero()) P = ApplyCaveRoughness(P, Nn, 0.0f, W);
-                    }
-
-                    const int32 k = i + j * Stride;
-                    VPos[k] = P;
-                    VIdx[k] = Mesh.AppendVertex(FVector3d(P));
-                    UIdx[k] = UVOverlay->AppendElement(UVAt(P, UAxis, VAxis));
+                    Base[i + j * Stride] = QuadPoint((double)i * InvN, (double)j * InvN);
                 }
             }
 
-            // Sub-triangles are 1/N^2 of the original area, so the degeneracy floor has to
-            // shrink with them or valid slivers get dropped and punch holes in the wall.
-            const double SubMinCross = MinCross / (double)(N * N);
+            for (int32 j = 0; j <= N; ++j)
+            {
+                for (int32 i = 0; i <= N; ++i)
+                {
+                    const int32 k = i + j * Stride;
+                    const double u = (double)i * InvN;
+                    const double v = (double)j * InvN;
 
+                    FVector P = Base[k];
+                    const float W = QuadWeight(u, v);
+                    if (W > 0.0f)
+                    {
+                        FVector Chord = FVector::ZeroVector;
+                        bool bChord = true;
+                        if (j == 0)      Chord = B.P - A.P;
+                        else if (j == N) Chord = C.P - Dv.P;
+                        else if (i == 0) Chord = Dv.P - A.P;
+                        else if (i == N) Chord = C.P - B.P;
+                        else             bChord = false;
+
+                        const FVector SurfN = bChord ? FVector::ZeroVector
+                            : FVector::CrossProduct(Base[k + 1] - Base[k - 1], Base[k + Stride] - Base[k - Stride]);
+                        P = CarveAt(P, W, QuadNormal(u, v), bChord ? &Chord : nullptr, SurfN);
+                    }
+                    Store(k, P);
+                }
+            }
+
+            // Every sub-cell inherits the parent's lattice diagonal.
             for (int32 j = 0; j < N; ++j)
             {
                 for (int32 i = 0; i < N; ++i)
                 {
-                    const int32 q0 = i + j * Stride;                 // A-like
-                    const int32 q1 = (i + 1) + j * Stride;           // B-like
-                    const int32 q2 = (i + 1) + (j + 1) * Stride;     // C-like
-                    const int32 q3 = i + (j + 1) * Stride;           // D-like
-
-                    const double dAC = FVector::DistSquared(VPos[q0], VPos[q2]);
-                    const double dBD = FVector::DistSquared(VPos[q1], VPos[q3]);
-                    const bool bSub = (dAC < dBD) ? false : ((dBD < dAC) ? true : bDiagBD);
-
-                    int32 T[2][3];
-                    if (!bSub) { T[0][0] = q0; T[0][1] = q1; T[0][2] = q2;  T[1][0] = q0; T[1][1] = q2; T[1][2] = q3; }
-                    else { T[0][0] = q1; T[0][1] = q2; T[0][2] = q3;  T[1][0] = q1; T[1][1] = q3; T[1][2] = q0; }
-
-                    for (int32 k = 0; k < 2; ++k)
-                    {
-                        const FVector& P0 = VPos[T[k][0]];
-                        const FVector& P1 = VPos[T[k][1]];
-                        const FVector& P2 = VPos[T[k][2]];
-
-                        const FVector X = FVector::CrossProduct(P2 - P0, P1 - P0);
-                        if (X.Size() <= SubMinCross) continue;
-
-                        const int32 t = Mesh.AppendTriangle(VIdx[T[k][0]], VIdx[T[k][1]], VIdx[T[k][2]]);
-                        if (t == FDynamicMesh3::InvalidID) continue;
-
-                        OutTriIDs.Add(t);
-                        const FVector3f Nf(X.GetSafeNormal());
-                        NormalOverlay->SetTriangle(t, FIndex3i(
-                            NormalOverlay->AppendElement(Nf),
-                            NormalOverlay->AppendElement(Nf),
-                            NormalOverlay->AppendElement(Nf)
-                        ));
-                        UVOverlay->SetTriangle(t, FIndex3i(UIdx[T[k][0]], UIdx[T[k][1]], UIdx[T[k][2]]));
-                        ColorOverlay->SetTriangle(t, FIndex3i(cIdx, cIdx, cIdx));
-                        if (MaterialIDAttribute) MaterialIDAttribute->SetValue(t, MatID);
-                    }
+                    const int32 q0 = i + j * Stride;
+                    EmitCell(q0, q0 + 1, q0 + 1 + Stride, q0 + Stride, bDiagBD);
                 }
             }
         };

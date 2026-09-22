@@ -414,6 +414,9 @@ struct FCaveSmoothCache
 
     bool GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal);
 
+    bool IsCellEdited(int32 cx, int32 cy, int32 cz);
+    bool AirReachesSurface(int32 vx, int32 vy, int32 vz, int32 qx, int32 qy, int32 qz);
+
 private:
     static constexpr int32 SLAB_COUNT = 8;   // power of two; index is z & 7
 
