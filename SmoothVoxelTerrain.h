@@ -306,9 +306,15 @@ struct FSmoothVertex
 {
     FVector   P = FVector::ZeroVector;
     FVector3f N = FVector3f::ZeroVector;
-    bool      bCurved = false;   // cave branch, with a usable field gradient
-};
+    bool      bCurved = false;
 
+    // Where the sample came from and how the cave solve placed it. Merge is -1 for an anchor,
+    // a mass-point fallback or any non-cave vertex; otherwise axis * 2 + (1 if the riser end
+    // merged towards +axis).
+    FIntVector Lattice = FIntVector::ZeroValue;
+    bool       bHasLattice = false;
+    int8       Merge = -1;
+};
 // --- Totally stateless thread-safe generation configuration struct ---
 struct FTerrainGenConfig
 {
@@ -373,6 +379,9 @@ struct FTerrainGenConfig
         const FIntVector& ChunkCoord,
         FCaveSmoothCache* CaveCache) const;
 
+    bool GetCaveVertex(int32 VertX, int32 VertY, int32 VertZ, const FIntVector& ChunkCoord,
+        FCaveSmoothCache* CaveCache, FSmoothVertex& Out) const;
+
     float GetHeightAtWorldCorner(int32 WorldX, int32 WorldY) const;
     float GetInterpolatedHeightLocal(float LocalX, float LocalY, const FLocalHeightGrid& HeightGrid) const;
 
@@ -405,17 +414,27 @@ struct FCaveSmoothCache
     bool IsReady() const { return bReady; }
 
 
-    bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);
-
     bool IsCellSmoothSurface(int32 cx, int32 cy, int32 cz);
 
     int32 SmoothCell[3] = { MIN_int32, MIN_int32, MIN_int32 };
     bool  bSmoothCellResult = false;
 
-    bool GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal);
+    bool  IsCellExpectedAir(int32 cx, int32 cy, int32 cz);   // public
+    bool  GetVertexOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal, int8* OutMerge = nullptr);
+    bool  GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal, int8& OutMerge);
 
     bool IsCellEdited(int32 cx, int32 cy, int32 cz);
     bool AirReachesSurface(int32 vx, int32 vy, int32 vz, int32 qx, int32 qy, int32 qz);
+
+    float CornerHeight(int32 x, int32 y);
+    float ColumnSurface(int32 cx, int32 cy);
+    int32 ColumnGround(int32 cx, int32 cy);
+
+    TArray<int8>  BaseMergeCache;
+    TArray<int8>  VertMergeCache;
+    int32         RingW = 0;
+    TArray<float> RingHeight;
+    TArray<uint8> RingHeightValid;
 
 private:
     static constexpr int32 SLAB_COUNT = 8;   // power of two; index is z & 7
@@ -426,7 +445,6 @@ private:
     TArray<FVector3f> BaseNormalCache;
     TArray<FVector3f> VertNormalCache;
 
-    bool GetBaseOffset(int32 vx, int32 vy, int32 vz, FVector3f& OutOffset, FVector3f& OutNormal);
 
     const FTerrainGenConfig* Config = nullptr;
     const FLocalHeightGrid* Heights = nullptr;
